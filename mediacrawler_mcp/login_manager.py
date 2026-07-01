@@ -139,10 +139,11 @@ class LoginManager:
 
     def manual_login_message(self) -> str:
         return (
-            "XHS login is required. For local testing, run a manual QR login once with "
-            "`uv run python main.py --platform xhs --lt qrcode --type search --keywords \"test\" "
-            "--crawler_max_notes_count 1 --get_comment false --headless false`, or call import_cookies "
-            "with a cookie string containing web_session."
+            "XHS login is required. For local testing, run a manual QR login once from the MediaCrawler "
+            "repo root: `python main.py --platform xhs --lt qrcode --type search --keywords \"test\" "
+            "--crawler_max_notes_count 1 --get_comment false --headless false`. If the server uses a venv, "
+            "activate it first, for example `. .venv/bin/activate`. You can also call import_cookies with "
+            "a cookie string containing web_session."
         )
 
     def _normalize_platform(self, platform: str) -> str:

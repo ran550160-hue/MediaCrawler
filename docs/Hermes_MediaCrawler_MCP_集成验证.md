@@ -52,7 +52,10 @@ mcp_servers:
     connect_timeout: 60
     env:
       MEDIACRAWLER_MCP_HOME: /data/mediacrawler-mcp
+      PYTHONPATH: /opt/mediacrawler/MediaCrawler
 ```
+
+`server.py` 会自动把 repo root 注入 `sys.path`，因此缺少 `PYTHONPATH` 时也可以启动；但部署配置中仍建议显式设置 `PYTHONPATH`，方便后续脚本、测试和 Hermes 子进程行为保持一致。
 
 如果使用 Hermes CLI，可参考：
 
@@ -161,7 +164,31 @@ mcp_mediacrawler_get_report
 
 这是正常行为，不应视为 MCP 接入失败。
 
-## 6. 飞书结果路径验证
+## 6. 登录与浏览器模式现状
+
+当前 Sprint 6 推荐优先使用 cookie 模式完成服务器采集：
+
+1. 在浏览器中导出小红书 cookie。
+2. 调用 `mcp_mediacrawler_import_cookies`，导入包含 `web_session` 的完整 cookie string。
+3. 再调用 `mcp_mediacrawler_start_collection`。
+
+导入 cookie 后，MCP 会用以下方式启动现有 MediaCrawler：
+
+```bash
+python main.py --platform xhs --lt cookie --cookies "<cookie_string>" ...
+```
+
+`MEDIACRAWLER_MCP_BROWSER_MODE` 和 `MEDIACRAWLER_MCP_CDP_ENDPOINT` 当前只属于 MCP 配置预留项，尚未真正传入 MediaCrawler 采集流程。不要假设设置这两个变量后就会自动启用或连接 CDP。
+
+如后续要走 CDP，需要单独实现并验证：
+
+- MCP 配置如何映射到 MediaCrawler 的 `ENABLE_CDP_MODE`、`CDP_DEBUG_PORT`、`CDP_CONNECT_EXISTING`。
+- 服务器上是否存在可访问的 Chrome CDP 端口。
+- 登录态 profile/cookie/localStorage 是否能被实际采集进程复用。
+
+如果走 persistent browser profile，也需要让 `LoginManager` 检测到的 profile 与 `CrawlerRunner` 实际启动爬虫使用的 profile 保持一致。
+
+## 7. 飞书结果路径验证
 
 当前 MCP 报告工具返回本地服务器路径：
 
@@ -180,7 +207,7 @@ HTML: /data/mediacrawler-mcp/datasets/ds_xxx/reports/report.html
 
 如果飞书侧不能直接打开服务器本地路径，Hermes 后续需要补一层文件读取或上传能力。MediaCrawler MCP 第一版只负责生成文件和返回路径，不直接依赖飞书 SDK。
 
-## 7. 图片路径预验证
+## 8. 图片路径预验证
 
 Sprint 7 会做二维码 PNG 输出。Sprint 6 先确认 Hermes/飞书是否能处理本地图片路径：
 
@@ -196,7 +223,7 @@ Sprint 7 会做二维码 PNG 输出。Sprint 6 先确认 Hermes/飞书是否能�
 二维码 PNG 上传：Sprint 7 验证
 ```
 
-## 8. 验收标准
+## 9. 验收标准
 
 - Hermes 新会话能发现 `mediacrawler` MCP tools。
 - `ping/create_dataset/list_datasets/get_dataset` 可直接调用成功。
