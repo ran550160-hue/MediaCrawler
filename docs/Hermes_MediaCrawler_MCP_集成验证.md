@@ -121,6 +121,9 @@ mcp_mediacrawler_list_datasets
 mcp_mediacrawler_get_dataset
 mcp_mediacrawler_get_login_status
 mcp_mediacrawler_import_cookies
+mcp_mediacrawler_start_qrcode_login
+mcp_mediacrawler_get_qrcode_login_status
+mcp_mediacrawler_cancel_qrcode_login
 mcp_mediacrawler_start_collection
 mcp_mediacrawler_get_task_status
 mcp_mediacrawler_cancel_task
@@ -197,7 +200,30 @@ MCP 默认 `MEDIACRAWLER_MCP_BROWSER_MODE=persistent_context`，采集命令会�
 
 如果走 persistent browser profile，也需要让 `LoginManager` 检测到的 profile 与 `CrawlerRunner` 实际启动爬虫使用的 profile 保持一致。
 
-小红书搜索接口一页通常返回 20 条。若 Hermes 调用 `start_collection(max_contents=1/3/5)`，当前 MCP 会在 raw 归档阶段裁剪 `xhs_contents.jsonl`，并只保留这些内容对应的评论，保证后续 normalize/report 看到的数量符合 `max_contents`。
+小红书搜索接口一页通常返回 20 条。若 Hermes 调用 `start_collection(max_contents=1/3/5)`，当前 MCP 会把数量限制前移到小红书 detail 请求构造前，避免对整页 20 条内容发起 detail 请求；raw 归档阶段仍会做兜底裁剪。
+
+### 二维码登录流程
+
+如果 cookie 过期或不方便手动复制 cookie，可以让 Hermes 走二维码登录：
+
+1. 调用 `mcp_mediacrawler_start_qrcode_login`。
+2. MCP 返回：
+
+```json
+{
+  "status": "waiting_scan",
+  "login_task_id": "task_qrcode_login_xhs_...",
+  "qr_image_path": "/data/mediacrawler-mcp/login_qrcodes/task_qrcode_login_xhs_....png",
+  "expires_at": "..."
+}
+```
+
+3. Hermes 读取 `qr_image_path` 并上传到飞书，让用户扫码。
+4. Hermes 轮询 `mcp_mediacrawler_get_qrcode_login_status(login_task_id)`。
+5. 返回 `status=success` 后，MCP 已保存 cookie，并且 Playwright persistent profile 已落到 `browser_data/xhs_user_data_dir`。
+6. 用户取消或二维码过期时，调用 `mcp_mediacrawler_cancel_qrcode_login(login_task_id)` 或重新发起二维码登录。
+
+二维码登录和小红书采集共用同一把 XHS browser profile 锁。同一时间只允许一个 XHS collection 或 QR login，避免多个 Playwright 进程抢占 `browser_data/xhs_user_data_dir` 导致 profile lock 或 launch timeout。
 
 ## 7. 飞书结果路径验证
 

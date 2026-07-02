@@ -9,6 +9,7 @@ from typing import Any
 from mediacrawler_mcp.crawler_runner import CollectionOptions, CrawlerRunner
 from mediacrawler_mcp.errors import ErrorCode, McpAppError
 from mediacrawler_mcp.login_manager import LoginManager
+from mediacrawler_mcp.locks import acquire_xhs_profile, current_xhs_profile_owner, release_xhs_profile
 from mediacrawler_mcp.storage import Storage
 from mediacrawler_mcp.utils import make_task_id, utc_now_iso
 
@@ -72,6 +73,13 @@ class TaskManager:
         )
 
         task_id = make_task_id("collect_xhs")
+        lock_owner = f"collection:{task_id}"
+        if not acquire_xhs_profile(lock_owner):
+            raise McpAppError(
+                ErrorCode.RESOURCE_BUSY,
+                "XHS browser profile is busy",
+                f"Current owner: {current_xhs_profile_owner()}",
+            )
         dataset_dir = Path(dataset["dataset_dir"])
         output_dir = dataset_dir / "logs" / task_id / "output"
         log_path = dataset_dir / "logs" / f"{task_id}.log"
@@ -89,12 +97,16 @@ class TaskManager:
             updated_at=now,
         )
 
-        process = self.runner.start(
-            keywords=keywords,
-            output_dir=output_dir,
-            log_path=log_path,
-            options=options,
-        )
+        try:
+            process = self.runner.start(
+                keywords=keywords,
+                output_dir=output_dir,
+                log_path=log_path,
+                options=options,
+            )
+        except Exception:
+            release_xhs_profile(lock_owner)
+            raise
         _RUNNING[task_id] = process
         self.storage.update_task(
             task_id,
@@ -107,7 +119,7 @@ class TaskManager:
 
         thread = threading.Thread(
             target=self._wait_for_collection,
-            args=(task_id, process, output_dir, dataset_dir / "raw", options),
+            args=(task_id, process, output_dir, dataset_dir / "raw", options, lock_owner),
             daemon=True,
         )
         thread.start()
@@ -172,45 +184,49 @@ class TaskManager:
         output_dir: Path,
         raw_dir: Path,
         options: CollectionOptions,
+        lock_owner: str,
     ) -> None:
-        return_code = process.wait()
-        _RUNNING.pop(task_id, None)
-        current = self.storage.get_task_row(task_id)
-        if current and current["status"] == "cancelled":
-            return
-        now = utc_now_iso()
-        if return_code != 0:
-            self.storage.update_task(
-                task_id,
-                status="failed",
-                progress=1.0,
-                error_code=ErrorCode.CRAWLER_FAILED,
-                error_message=f"Crawler exited with code {return_code}",
-                finished_at=now,
-                updated_at=now,
-            )
-            return
-
         try:
-            self.storage.update_task(task_id, status="archiving", progress=0.9, updated_at=utc_now_iso())
-            self.runner.archive_outputs(output_dir=output_dir, raw_dir=raw_dir, max_contents=options.max_contents)
-            self.storage.update_task(
-                task_id,
-                status="ready",
-                progress=1.0,
-                finished_at=utc_now_iso(),
-                updated_at=utc_now_iso(),
-            )
-        except McpAppError as exc:
-            self.storage.update_task(
-                task_id,
-                status="failed",
-                progress=1.0,
-                error_code=exc.code,
-                error_message=exc.detail or exc.message,
-                finished_at=utc_now_iso(),
-                updated_at=utc_now_iso(),
-            )
+            return_code = process.wait()
+            _RUNNING.pop(task_id, None)
+            current = self.storage.get_task_row(task_id)
+            if current and current["status"] == "cancelled":
+                return
+            now = utc_now_iso()
+            if return_code != 0:
+                self.storage.update_task(
+                    task_id,
+                    status="failed",
+                    progress=1.0,
+                    error_code=ErrorCode.CRAWLER_FAILED,
+                    error_message=f"Crawler exited with code {return_code}",
+                    finished_at=now,
+                    updated_at=now,
+                )
+                return
+
+            try:
+                self.storage.update_task(task_id, status="archiving", progress=0.9, updated_at=utc_now_iso())
+                self.runner.archive_outputs(output_dir=output_dir, raw_dir=raw_dir, max_contents=options.max_contents)
+                self.storage.update_task(
+                    task_id,
+                    status="ready",
+                    progress=1.0,
+                    finished_at=utc_now_iso(),
+                    updated_at=utc_now_iso(),
+                )
+            except McpAppError as exc:
+                self.storage.update_task(
+                    task_id,
+                    status="failed",
+                    progress=1.0,
+                    error_code=exc.code,
+                    error_message=exc.detail or exc.message,
+                    finished_at=utc_now_iso(),
+                    updated_at=utc_now_iso(),
+                )
+        finally:
+            release_xhs_profile(lock_owner)
 
     def _browser_mode_options(self) -> tuple[bool, bool]:
         mode = (self.storage.config.browser_mode or "").strip().lower()

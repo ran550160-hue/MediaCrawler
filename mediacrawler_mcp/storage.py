@@ -113,6 +113,7 @@ class Storage:
         self.config.datasets_dir.mkdir(parents=True, exist_ok=True)
         self.config.logs_dir.mkdir(parents=True, exist_ok=True)
         self.config.accounts_dir.mkdir(parents=True, exist_ok=True)
+        self.config.login_qrcodes_dir.mkdir(parents=True, exist_ok=True)
         with self.connect() as conn:
             conn.execute("PRAGMA journal_mode=WAL")
             for statement in SCHEMA_STATEMENTS:
@@ -384,4 +385,59 @@ class Storage:
     def get_account_row(self, account_id: str) -> dict[str, Any] | None:
         with self.connect() as conn:
             row = conn.execute("SELECT * FROM accounts WHERE account_id = ?", (account_id,)).fetchone()
+        return dict(row) if row else None
+
+    def upsert_login_session(
+        self,
+        login_session_id: str,
+        platform: str,
+        account_name: str,
+        status: str,
+        qr_image_path: str | None,
+        profile_dir: str | None,
+        expires_at: str | None,
+        message: str | None,
+        created_at: str,
+        updated_at: str,
+    ) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO login_sessions (
+                    login_session_id, platform, account_name, status,
+                    qr_image_path, profile_dir, expires_at, message,
+                    created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(login_session_id) DO UPDATE SET
+                    platform=excluded.platform,
+                    account_name=excluded.account_name,
+                    status=excluded.status,
+                    qr_image_path=excluded.qr_image_path,
+                    profile_dir=excluded.profile_dir,
+                    expires_at=excluded.expires_at,
+                    message=excluded.message,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    login_session_id,
+                    platform,
+                    account_name,
+                    status,
+                    qr_image_path,
+                    profile_dir,
+                    expires_at,
+                    message,
+                    created_at,
+                    updated_at,
+                ),
+            )
+            conn.commit()
+
+    def get_login_session_row(self, login_session_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM login_sessions WHERE login_session_id = ?",
+                (login_session_id,),
+            ).fetchone()
         return dict(row) if row else None

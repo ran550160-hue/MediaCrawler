@@ -8,6 +8,7 @@ from mediacrawler_mcp.config import McpConfig
 from mediacrawler_mcp.crawler_runner import CollectionOptions, CrawlerRunner
 from mediacrawler_mcp.dataset_service import DatasetService
 from mediacrawler_mcp.errors import ErrorCode, McpAppError
+from mediacrawler_mcp.locks import acquire_xhs_profile, current_xhs_profile_owner, release_xhs_profile
 from mediacrawler_mcp.storage import Storage
 from mediacrawler_mcp.task_manager import TaskManager
 
@@ -249,6 +250,33 @@ def test_start_collection_requires_login_before_starting_runner(tmp_path):
 
     assert exc_info.value.code == ErrorCode.LOGIN_REQUIRED
     assert runner.started == {}
+
+
+def test_start_collection_rejects_when_xhs_profile_is_busy(tmp_path):
+    runner = FakeRunner(FakeProcess())
+    dataset, manager, _ = _setup(tmp_path, runner)
+    owner = "test:busy"
+    assert acquire_xhs_profile(owner) is True
+    try:
+        with pytest.raises(McpAppError) as exc_info:
+            manager.start_collection(dataset.dataset_id)
+
+        assert exc_info.value.code == ErrorCode.RESOURCE_BUSY
+        assert runner.started == {}
+    finally:
+        release_xhs_profile(owner)
+
+
+def test_start_collection_holds_profile_lock_until_process_finishes(tmp_path):
+    process = FakeProcess(return_code=0, block_until_terminated=True)
+    runner = FakeRunner(process)
+    dataset, manager, _ = _setup(tmp_path, runner)
+
+    result = manager.start_collection(dataset.dataset_id)
+
+    assert current_xhs_profile_owner() == f"collection:{result['task_id']}"
+    manager.cancel_task(result["task_id"])
+    _wait_until(lambda: current_xhs_profile_owner() is None)
 
 
 def test_start_collection_does_not_continue_with_expired_cookie_status(tmp_path):

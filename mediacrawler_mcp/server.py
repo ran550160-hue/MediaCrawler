@@ -16,6 +16,7 @@ from mediacrawler_mcp.dataset_service import DatasetService
 from mediacrawler_mcp.errors import ErrorCode, McpAppError, error_result, success_result
 from mediacrawler_mcp.login_manager import LoginManager
 from mediacrawler_mcp.normalizer import DatasetNormalizer
+from mediacrawler_mcp.qrcode_login import QRCodeLoginManager
 from mediacrawler_mcp.query_engine import QueryEngine
 from mediacrawler_mcp.report_service import ReportService
 from mediacrawler_mcp.storage import Storage
@@ -221,6 +222,52 @@ def import_cookies(
     except Exception as exc:  # pragma: no cover - safety boundary for MCP tools
         logging.exception("Failed to import cookies")
         return error_result(ErrorCode.INTERNAL_ERROR, "Failed to import cookies", str(exc))
+
+
+@mcp.tool()
+def start_qrcode_login(
+    platform: str = "xhs",
+    account_name: str = "default",
+    timeout_seconds: int = 120,
+    headless: bool = True,
+) -> dict[str, Any]:
+    """Start an XHS QR-code login task and return a QR image path for Feishu."""
+    try:
+        return QRCodeLoginManager(_storage()).start_qrcode_login(
+            platform=platform,
+            account_name=account_name,
+            timeout_seconds=timeout_seconds,
+            headless=headless,
+        )
+    except McpAppError as exc:
+        return exc.to_result()
+    except Exception as exc:  # pragma: no cover - safety boundary for MCP tools
+        logging.exception("Failed to start QR login")
+        return error_result(ErrorCode.INTERNAL_ERROR, "Failed to start QR login", str(exc))
+
+
+@mcp.tool()
+def get_qrcode_login_status(login_task_id: str) -> dict[str, Any]:
+    """Get QR-code login task status."""
+    try:
+        return QRCodeLoginManager(_storage()).get_qrcode_login_status(login_task_id)
+    except McpAppError as exc:
+        return exc.to_result()
+    except Exception as exc:  # pragma: no cover - safety boundary for MCP tools
+        logging.exception("Failed to get QR login status")
+        return error_result(ErrorCode.INTERNAL_ERROR, "Failed to get QR login status", str(exc))
+
+
+@mcp.tool()
+def cancel_qrcode_login(login_task_id: str) -> dict[str, Any]:
+    """Cancel an active QR-code login task."""
+    try:
+        return QRCodeLoginManager(_storage()).cancel_qrcode_login(login_task_id)
+    except McpAppError as exc:
+        return exc.to_result()
+    except Exception as exc:  # pragma: no cover - safety boundary for MCP tools
+        logging.exception("Failed to cancel QR login")
+        return error_result(ErrorCode.INTERNAL_ERROR, "Failed to cancel QR login", str(exc))
 
 
 @mcp.tool()
