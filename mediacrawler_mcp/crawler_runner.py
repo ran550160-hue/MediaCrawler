@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 import sys
@@ -22,6 +23,8 @@ class CollectionOptions:
     headless: bool = True
     login_type: str = "qrcode"
     cookie_string: str | None = None
+    enable_cdp_mode: bool = False
+    cdp_connect_existing: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -32,6 +35,8 @@ class CollectionOptions:
             "headless": self.headless,
             "login_type": self.login_type,
             "cookie_present": bool(self.cookie_string),
+            "enable_cdp_mode": self.enable_cdp_mode,
+            "cdp_connect_existing": self.cdp_connect_existing,
         }
 
 
@@ -70,6 +75,10 @@ class CrawlerRunner:
             str(options.include_sub_comments).lower(),
             "--headless",
             str(options.headless).lower(),
+            "--enable_cdp_mode",
+            str(options.enable_cdp_mode).lower(),
+            "--cdp_connect_existing",
+            str(options.cdp_connect_existing).lower(),
         ]
         if options.cookie_string:
             command.extend(["--cookies", options.cookie_string])
@@ -97,7 +106,7 @@ class CrawlerRunner:
             log_file.close()
             raise
 
-    def archive_outputs(self, output_dir: Path, raw_dir: Path) -> dict[str, str]:
+    def archive_outputs(self, output_dir: Path, raw_dir: Path, max_contents: int | None = None) -> dict[str, str]:
         raw_dir.mkdir(parents=True, exist_ok=True)
         jsonl_dir = output_dir / "xhs" / "jsonl"
         if not jsonl_dir.exists():
@@ -108,6 +117,7 @@ class CrawlerRunner:
             )
 
         archived: dict[str, str] = {}
+        selected_content_ids: set[str] | None = None
         for item_type, target_name in (("contents", "xhs_contents.jsonl"), ("comments", "xhs_comments.jsonl")):
             candidates = sorted(
                 jsonl_dir.glob(f"search_{item_type}_*.jsonl"),
@@ -117,7 +127,12 @@ class CrawlerRunner:
             if not candidates:
                 continue
             target = raw_dir / target_name
-            shutil.copyfile(candidates[0], target)
+            if item_type == "contents" and max_contents:
+                selected_content_ids = self._copy_limited_contents(candidates[0], target, max_contents)
+            elif item_type == "comments" and selected_content_ids is not None:
+                self._copy_comments_for_contents(candidates[0], target, selected_content_ids)
+            else:
+                shutil.copyfile(candidates[0], target)
             archived[item_type] = str(target)
         if not archived:
             raise McpAppError(
@@ -126,3 +141,37 @@ class CrawlerRunner:
                 f"Output directory: {jsonl_dir}",
             )
         return archived
+
+    @staticmethod
+    def _copy_limited_contents(source: Path, target: Path, max_contents: int) -> set[str]:
+        selected_ids: set[str] = set()
+        written = 0
+        with source.open("r", encoding="utf-8") as src, target.open("w", encoding="utf-8") as dst:
+            for line in src:
+                if written >= max_contents:
+                    break
+                if not line.strip():
+                    continue
+                dst.write(line)
+                written += 1
+                try:
+                    item = json.loads(line)
+                except Exception:
+                    continue
+                content_id = str(item.get("note_id") or "").strip()
+                if content_id:
+                    selected_ids.add(content_id)
+        return selected_ids
+
+    @staticmethod
+    def _copy_comments_for_contents(source: Path, target: Path, content_ids: set[str]) -> None:
+        with source.open("r", encoding="utf-8") as src, target.open("w", encoding="utf-8") as dst:
+            for line in src:
+                if not line.strip():
+                    continue
+                try:
+                    item = json.loads(line)
+                except Exception:
+                    continue
+                if str(item.get("note_id") or "").strip() in content_ids:
+                    dst.write(line)

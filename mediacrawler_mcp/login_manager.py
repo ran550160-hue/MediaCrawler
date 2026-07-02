@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import httpx
+
 from mediacrawler_mcp.crawler_runner import REPO_ROOT
 from mediacrawler_mcp.errors import ErrorCode, McpAppError
 from mediacrawler_mcp.storage import Storage
@@ -18,7 +20,12 @@ class LoginManager:
         self.storage = storage
         self.repo_root = Path(repo_root)
 
-    def get_login_status(self, platform: str = SUPPORTED_PLATFORM, account_name: str = DEFAULT_ACCOUNT_NAME) -> dict[str, Any]:
+    def get_login_status(
+        self,
+        platform: str = SUPPORTED_PLATFORM,
+        account_name: str = DEFAULT_ACCOUNT_NAME,
+        verify_remote: bool = False,
+    ) -> dict[str, Any]:
         platform = self._normalize_platform(platform)
         account_name = self._normalize_account_name(account_name)
         self.storage.initialize()
@@ -27,6 +34,26 @@ class LoginManager:
         cookie_path = self.cookie_file_path(platform, account_name)
         cookie_string = self._read_cookie_file(cookie_path)
         if cookie_string and self.extract_web_session(cookie_string):
+            if verify_remote and not self._verify_xhs_cookie_remote(cookie_string):
+                self._upsert_account(
+                    platform=platform,
+                    account_name=account_name,
+                    profile_dir=str(cookie_path.parent),
+                    status="expired",
+                    last_login_at=None,
+                    last_checked_at=now,
+                )
+                return {
+                    "status": "expired",
+                    "platform": platform,
+                    "account_name": account_name,
+                    "login_source": "cookie",
+                    "cookie_file_path": str(cookie_path),
+                    "profile_dir": str(cookie_path.parent),
+                    "last_checked_at": now,
+                    "remote_verified": False,
+                    "message": "XHS cookie exists but remote selfinfo verification failed. Re-import a fresh cookie.",
+                }
             self._upsert_account(
                 platform=platform,
                 account_name=account_name,
@@ -43,7 +70,12 @@ class LoginManager:
                 "cookie_file_path": str(cookie_path),
                 "profile_dir": str(cookie_path.parent),
                 "last_checked_at": now,
-                "message": "XHS cookie with web_session is available. Live remote validation is not performed in this sprint.",
+                "remote_verified": verify_remote,
+                "message": (
+                    "XHS cookie remote verification succeeded."
+                    if verify_remote
+                    else "XHS cookie with web_session is available. Remote validation was not requested."
+                ),
             }
 
         profile_dir = self._find_available_profile_dir(platform, account_name)
@@ -64,6 +96,7 @@ class LoginManager:
                 "cookie_file_path": str(cookie_path) if cookie_path.exists() else None,
                 "profile_dir": str(profile_dir),
                 "last_checked_at": now,
+                "remote_verified": False,
                 "message": "Detected a local XHS browser profile. Live remote validation is not performed in this sprint.",
             }
 
@@ -83,6 +116,7 @@ class LoginManager:
             "cookie_file_path": str(cookie_path) if cookie_path.exists() else None,
             "profile_dir": None,
             "last_checked_at": now,
+            "remote_verified": False,
             "message": self.manual_login_message(),
         }
 
@@ -210,6 +244,39 @@ class LoginManager:
             created_at=(existing or {}).get("created_at") or now,
             updated_at=now,
         )
+
+    def _verify_xhs_cookie_remote(self, cookie_string: str) -> bool:
+        uri = "/api/sns/web/v1/user/selfinfo"
+        host = "https://edith.xiaohongshu.com"
+        try:
+            from media_platform.xhs.playwright_sign import sign_with_xhshow
+
+            signs = sign_with_xhshow(uri=uri, data={}, cookie_str=cookie_string, method="GET")
+            headers = {
+                "accept": "application/json, text/plain, */*",
+                "accept-language": "zh-CN,zh;q=0.9",
+                "cache-control": "no-cache",
+                "content-type": "application/json;charset=UTF-8",
+                "origin": "https://www.xiaohongshu.com",
+                "pragma": "no-cache",
+                "referer": "https://www.xiaohongshu.com/",
+                "user-agent": (
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36"
+                ),
+                "Cookie": cookie_string,
+                "X-S": signs["x-s"],
+                "X-T": signs["x-t"],
+                "x-S-Common": signs["x-s-common"],
+                "X-B3-Traceid": signs["x-b3-traceid"],
+            }
+            response = httpx.get(f"{host}{uri}", headers=headers, timeout=15)
+            if response.status_code != 200:
+                return False
+            payload = response.json()
+            return bool(payload.get("data", {}).get("result", {}).get("success"))
+        except Exception:
+            return False
 
     @staticmethod
     def extract_web_session(cookie_string: str) -> str | None:

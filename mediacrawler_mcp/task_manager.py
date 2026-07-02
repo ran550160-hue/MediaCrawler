@@ -58,6 +58,7 @@ class TaskManager:
             )
         cookie_string = self.login_manager.get_cookie_string("xhs")
         keywords = json.loads(dataset["keywords_json"])
+        enable_cdp_mode, cdp_connect_existing = self._browser_mode_options()
         options = CollectionOptions(
             include_comments=include_comments,
             max_contents=max(1, int(max_contents or 20)),
@@ -66,6 +67,8 @@ class TaskManager:
             headless=headless,
             login_type="cookie" if cookie_string else "qrcode",
             cookie_string=cookie_string,
+            enable_cdp_mode=enable_cdp_mode,
+            cdp_connect_existing=cdp_connect_existing,
         )
 
         task_id = make_task_id("collect_xhs")
@@ -104,7 +107,7 @@ class TaskManager:
 
         thread = threading.Thread(
             target=self._wait_for_collection,
-            args=(task_id, process, output_dir, dataset_dir / "raw"),
+            args=(task_id, process, output_dir, dataset_dir / "raw", options),
             daemon=True,
         )
         thread.start()
@@ -162,7 +165,14 @@ class TaskManager:
         )
         return {"task_id": task_id, "status": "cancelled"}
 
-    def _wait_for_collection(self, task_id: str, process: subprocess.Popen, output_dir: Path, raw_dir: Path) -> None:
+    def _wait_for_collection(
+        self,
+        task_id: str,
+        process: subprocess.Popen,
+        output_dir: Path,
+        raw_dir: Path,
+        options: CollectionOptions,
+    ) -> None:
         return_code = process.wait()
         _RUNNING.pop(task_id, None)
         current = self.storage.get_task_row(task_id)
@@ -183,7 +193,7 @@ class TaskManager:
 
         try:
             self.storage.update_task(task_id, status="archiving", progress=0.9, updated_at=utc_now_iso())
-            self.runner.archive_outputs(output_dir=output_dir, raw_dir=raw_dir)
+            self.runner.archive_outputs(output_dir=output_dir, raw_dir=raw_dir, max_contents=options.max_contents)
             self.storage.update_task(
                 task_id,
                 status="ready",
@@ -201,3 +211,11 @@ class TaskManager:
                 finished_at=utc_now_iso(),
                 updated_at=utc_now_iso(),
             )
+
+    def _browser_mode_options(self) -> tuple[bool, bool]:
+        mode = (self.storage.config.browser_mode or "").strip().lower()
+        if mode in {"cdp", "cdp_existing", "cdp-connect-existing"}:
+            return True, True
+        if mode in {"cdp_launch", "cdp-launch", "cdp_new", "cdp-new"}:
+            return True, False
+        return False, False

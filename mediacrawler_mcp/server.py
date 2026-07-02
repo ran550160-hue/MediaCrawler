@@ -184,10 +184,18 @@ def get_report(dataset_id: str, report_id: str | None = None) -> dict[str, Any]:
 
 
 @mcp.tool()
-def get_login_status(platform: str = "xhs", account_name: str = "default") -> dict[str, Any]:
+def get_login_status(
+    platform: str = "xhs",
+    account_name: str = "default",
+    verify_remote: bool = False,
+) -> dict[str, Any]:
     """Get local login status for a platform account."""
     try:
-        return LoginManager(_storage()).get_login_status(platform=platform, account_name=account_name)
+        return LoginManager(_storage()).get_login_status(
+            platform=platform,
+            account_name=account_name,
+            verify_remote=verify_remote,
+        )
     except McpAppError as exc:
         return exc.to_result()
     except Exception as exc:  # pragma: no cover - safety boundary for MCP tools

@@ -68,7 +68,33 @@ def test_import_cookies_stores_cookie_and_account_record(tmp_path):
     status = manager.get_login_status("xhs")
     assert status["status"] == "logged_in"
     assert status["login_source"] == "cookie"
+    assert status["remote_verified"] is False
     assert manager.get_cookie_string("xhs") == "a=b; web_session=session-value; c=d"
+
+
+def test_get_login_status_can_remote_verify_cookie(tmp_path, monkeypatch):
+    storage = _storage(tmp_path)
+    manager = LoginManager(storage, repo_root=tmp_path / "repo")
+    manager.import_cookies("xhs", "a=b; web_session=session-value; c=d")
+    monkeypatch.setattr(manager, "_verify_xhs_cookie_remote", lambda cookie: True)
+
+    status = manager.get_login_status("xhs", verify_remote=True)
+
+    assert status["status"] == "logged_in"
+    assert status["remote_verified"] is True
+
+
+def test_get_login_status_marks_cookie_expired_when_remote_verify_fails(tmp_path, monkeypatch):
+    storage = _storage(tmp_path)
+    manager = LoginManager(storage, repo_root=tmp_path / "repo")
+    manager.import_cookies("xhs", "a=b; web_session=session-value; c=d")
+    monkeypatch.setattr(manager, "_verify_xhs_cookie_remote", lambda cookie: False)
+
+    status = manager.get_login_status("xhs", verify_remote=True)
+
+    assert status["status"] == "expired"
+    assert status["remote_verified"] is False
+    assert storage.get_account_row("xhs:default")["status"] == "expired"
 
 
 def test_import_cookies_rejects_missing_web_session(tmp_path):

@@ -23,6 +23,7 @@
 # 许可协议: MIT License
 
 import hashlib
+import inspect
 import json
 import time
 from typing import Any, Dict, Optional, Union
@@ -44,6 +45,10 @@ def _patch_xhshow_a3_hash():
     相关 issue: https://github.com/Cloxl/xhshow/issues/104
     """
     from xhshow.core.crypto import CryptoProcessor
+
+    signature = inspect.signature(CryptoProcessor.build_payload_array)
+    if "hex_md5_path" in signature.parameters:
+        return
 
     _original_build = CryptoProcessor.build_payload_array
 
@@ -67,6 +72,33 @@ def _patch_xhshow_a3_hash():
 
 # 启动时应用 monkey-patch
 _patch_xhshow_a3_hash()
+
+
+def _build_payload_array_compat(
+    crypto_processor: Any,
+    hex_parameter: str,
+    a1_value: str,
+    app_identifier: str,
+    string_param: str,
+    timestamp: float,
+) -> list[int]:
+    signature = inspect.signature(crypto_processor.build_payload_array)
+    if "hex_md5_path" in signature.parameters:
+        return crypto_processor.build_payload_array(
+            hex_parameter,
+            hex_parameter,
+            a1_value,
+            app_identifier,
+            string_param,
+            timestamp,
+        )
+    return crypto_processor.build_payload_array(
+        hex_parameter,
+        a1_value,
+        app_identifier,
+        string_param,
+        timestamp,
+    )
 
 
 def _build_sign_string(uri: str, data: Optional[Union[Dict, str]] = None, method: str = "POST") -> str:
@@ -148,8 +180,13 @@ def sign_with_xhshow(
         ts = time.time()
         d_value = hashlib.md5(content_string.encode("utf-8")).hexdigest()
 
-        payload_array = xhshow_client.crypto_processor.build_payload_array(
-            d_value, a1_value, "xhs-pc-web", content_string, ts
+        payload_array = _build_payload_array_compat(
+            xhshow_client.crypto_processor,
+            d_value,
+            a1_value,
+            "xhs-pc-web",
+            content_string,
+            ts,
         )
         xor_result = xhshow_client.crypto_processor.bit_ops.xor_transform_array(payload_array)
         config = xhshow_client.config

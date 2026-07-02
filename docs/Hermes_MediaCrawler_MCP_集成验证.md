@@ -170,7 +170,8 @@ mcp_mediacrawler_get_report
 
 1. 在浏览器中导出小红书 cookie。
 2. 调用 `mcp_mediacrawler_import_cookies`，导入包含 `web_session` 的完整 cookie string。
-3. 再调用 `mcp_mediacrawler_start_collection`。
+3. 调用 `mcp_mediacrawler_get_login_status`。如果要确认 cookie 是否仍被小红书远端认可，可传 `verify_remote: true`。
+4. 再调用 `mcp_mediacrawler_start_collection`。
 
 导入 cookie 后，MCP 会用以下方式启动现有 MediaCrawler：
 
@@ -178,7 +179,15 @@ mcp_mediacrawler_get_report
 python main.py --platform xhs --lt cookie --cookies "<cookie_string>" ...
 ```
 
-`MEDIACRAWLER_MCP_BROWSER_MODE` 和 `MEDIACRAWLER_MCP_CDP_ENDPOINT` 当前只属于 MCP 配置预留项，尚未真正传入 MediaCrawler 采集流程。不要假设设置这两个变量后就会自动启用或连接 CDP。
+MCP 默认 `MEDIACRAWLER_MCP_BROWSER_MODE=persistent_context`，采集命令会显式传入：
+
+```bash
+--enable_cdp_mode false --cdp_connect_existing false
+```
+
+因此服务器 cookie 模式不需要手工修改 `config/base_config.py`。
+
+如果将 `MEDIACRAWLER_MCP_BROWSER_MODE` 设置为 `cdp` 或 `cdp_existing`，MCP 会显式打开 CDP 并尝试连接已有浏览器；如果设置为 `cdp_launch`，则打开 CDP 但不强制连接已有浏览器。`MEDIACRAWLER_MCP_CDP_ENDPOINT` 当前仍属于预留项，尚未映射到现有 MediaCrawler 的 CDP 端口配置。
 
 如后续要走 CDP，需要单独实现并验证：
 
@@ -187,6 +196,8 @@ python main.py --platform xhs --lt cookie --cookies "<cookie_string>" ...
 - 登录态 profile/cookie/localStorage 是否能被实际采集进程复用。
 
 如果走 persistent browser profile，也需要让 `LoginManager` 检测到的 profile 与 `CrawlerRunner` 实际启动爬虫使用的 profile 保持一致。
+
+小红书搜索接口一页通常返回 20 条。若 Hermes 调用 `start_collection(max_contents=1/3/5)`，当前 MCP 会在 raw 归档阶段裁剪 `xhs_contents.jsonl`，并只保留这些内容对应的评论，保证后续 normalize/report 看到的数量符合 `max_contents`。
 
 ## 7. 飞书结果路径验证
 

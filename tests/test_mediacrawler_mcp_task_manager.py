@@ -127,6 +127,8 @@ def test_start_collection_runs_runner_and_archives_outputs(tmp_path):
     assert runner.started["options"].max_contents == 12
     assert runner.started["options"].max_comments_per_content == 3
     assert runner.started["options"].headless is False
+    assert runner.started["options"].enable_cdp_mode is False
+    assert runner.started["options"].cdp_connect_existing is False
 
     _wait_until(lambda: manager.get_task_status(result["task_id"])["status"] == "ready")
     status = manager.get_task_status(result["task_id"])
@@ -136,6 +138,61 @@ def test_start_collection_runs_runner_and_archives_outputs(tmp_path):
     raw_dir = Path(dataset.dataset_dir) / "raw"
     assert (raw_dir / "xhs_contents.jsonl").exists()
     assert (raw_dir / "xhs_comments.jsonl").exists()
+
+
+def test_crawler_runner_build_command_disables_cdp_by_default(tmp_path):
+    runner = CrawlerRunner(repo_root=tmp_path)
+    command = runner.build_command(
+        keywords=["AI编程副业"],
+        output_dir=tmp_path / "out",
+        options=CollectionOptions(max_contents=3, login_type="cookie", cookie_string="web_session=abc"),
+    )
+
+    assert "--enable_cdp_mode" in command
+    assert command[command.index("--enable_cdp_mode") + 1] == "false"
+    assert "--cdp_connect_existing" in command
+    assert command[command.index("--cdp_connect_existing") + 1] == "false"
+    assert command[command.index("--crawler_max_notes_count") + 1] == "3"
+    assert command[command.index("--lt") + 1] == "cookie"
+
+
+def test_archive_outputs_trims_contents_and_related_comments(tmp_path):
+    output_dir = tmp_path / "output"
+    jsonl_dir = output_dir / "xhs" / "jsonl"
+    jsonl_dir.mkdir(parents=True)
+    contents = [
+        {"note_id": "n1", "title": "one"},
+        {"note_id": "n2", "title": "two"},
+        {"note_id": "n3", "title": "three"},
+    ]
+    comments = [
+        {"comment_id": "c1", "note_id": "n1"},
+        {"comment_id": "c2", "note_id": "n2"},
+        {"comment_id": "c3", "note_id": "n3"},
+    ]
+    (jsonl_dir / "search_contents_2026-07-01.jsonl").write_text(
+        "".join(json.dumps(item, ensure_ascii=False) + "\n" for item in contents),
+        encoding="utf-8",
+    )
+    (jsonl_dir / "search_comments_2026-07-01.jsonl").write_text(
+        "".join(json.dumps(item, ensure_ascii=False) + "\n" for item in comments),
+        encoding="utf-8",
+    )
+
+    raw_dir = tmp_path / "raw"
+    archived = CrawlerRunner(repo_root=tmp_path).archive_outputs(output_dir, raw_dir, max_contents=2)
+
+    assert set(archived) == {"contents", "comments"}
+    content_rows = [
+        json.loads(line)
+        for line in (raw_dir / "xhs_contents.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    comment_rows = [
+        json.loads(line)
+        for line in (raw_dir / "xhs_comments.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert [row["note_id"] for row in content_rows] == ["n1", "n2"]
+    assert [row["note_id"] for row in comment_rows] == ["n1", "n2"]
 
 
 def test_start_collection_marks_failed_when_process_fails(tmp_path):
