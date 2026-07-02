@@ -129,16 +129,14 @@ class XiaoHongShuCrawler(AbstractCrawler):
     async def search(self) -> None:
         """Search for notes and retrieve their comment information."""
         utils.logger.info("[XiaoHongShuCrawler.search] Begin search Xiaohongshu keywords")
-        xhs_limit_count = 20  # Xiaohongshu limit page fixed value
-        if config.CRAWLER_MAX_NOTES_COUNT < xhs_limit_count:
-            config.CRAWLER_MAX_NOTES_COUNT = xhs_limit_count
         start_page = config.START_PAGE
         for keyword in config.KEYWORDS.split(","):
             source_keyword_var.set(keyword)
             utils.logger.info(f"[XiaoHongShuCrawler.search] Current search keyword: {keyword}")
             page = 1
+            crawled_count = 0
             search_id = get_search_id()
-            while (page - start_page + 1) * xhs_limit_count <= config.CRAWLER_MAX_NOTES_COUNT:
+            while crawled_count < config.CRAWLER_MAX_NOTES_COUNT:
                 if page < start_page:
                     utils.logger.info(f"[XiaoHongShuCrawler.search] Skip page {page}")
                     page += 1
@@ -158,6 +156,15 @@ class XiaoHongShuCrawler(AbstractCrawler):
                     if not notes_res or not notes_res.get("has_more", False):
                         utils.logger.info("[XiaoHongShuCrawler.search] No more content!")
                         break
+                    remaining = config.CRAWLER_MAX_NOTES_COUNT - crawled_count
+                    note_items = [
+                        post_item
+                        for post_item in notes_res.get("items", {})
+                        if post_item.get("model_type") not in ("rec_query", "hot_query")
+                    ][:remaining]
+                    if not note_items:
+                        utils.logger.info("[XiaoHongShuCrawler.search] No valid note items on this page")
+                        break
                     semaphore = asyncio.Semaphore(config.MAX_CONCURRENCY_NUM)
                     task_list = [
                         self.get_note_detail_async_task(
@@ -165,15 +172,21 @@ class XiaoHongShuCrawler(AbstractCrawler):
                             xsec_source=post_item.get("xsec_source"),
                             xsec_token=post_item.get("xsec_token"),
                             semaphore=semaphore,
-                        ) for post_item in notes_res.get("items", {}) if post_item.get("model_type") not in ("rec_query", "hot_query")
+                        ) for post_item in note_items
                     ]
-                    note_details = await asyncio.gather(*task_list)
+                    note_details = await asyncio.gather(*task_list, return_exceptions=True)
                     for note_detail in note_details:
+                        if isinstance(note_detail, Exception):
+                            utils.logger.warning(f"[XiaoHongShuCrawler.search] Skip failed note detail task: {note_detail}")
+                            continue
                         if note_detail:
                             await xhs_store.update_xhs_note(note_detail)
                             await self.get_notice_media(note_detail)
                             note_ids.append(note_detail.get("note_id"))
                             xsec_tokens.append(note_detail.get("xsec_token"))
+                    if task_list and not note_ids:
+                        raise DataFetchError("[XiaoHongShuCrawler.search] All note detail tasks failed")
+                    crawled_count += len(note_ids)
                     page += 1
                     utils.logger.info(f"[XiaoHongShuCrawler.search] Note details: {note_details}")
                     await self.batch_get_note_comments(note_ids, xsec_tokens)
@@ -183,7 +196,7 @@ class XiaoHongShuCrawler(AbstractCrawler):
                     utils.logger.info(f"[XiaoHongShuCrawler.search] Sleeping for {config.CRAWLER_MAX_SLEEP_SEC} seconds after page {page-1}")
                 except DataFetchError:
                     utils.logger.error("[XiaoHongShuCrawler.search] Get note detail error")
-                    break
+                    raise
 
     async def get_creators_and_notes(self) -> None:
         """Get creator's notes and retrieve their comment information."""

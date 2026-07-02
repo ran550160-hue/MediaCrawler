@@ -95,6 +95,37 @@ def test_get_login_status_marks_cookie_expired_when_remote_verify_fails(tmp_path
     assert status["status"] == "expired"
     assert status["remote_verified"] is False
     assert storage.get_account_row("xhs:default")["status"] == "expired"
+    assert manager.get_cookie_string("xhs") is None
+
+    status_without_verify = manager.get_login_status("xhs")
+    assert status_without_verify["status"] == "expired"
+
+
+def test_remote_cookie_verify_uses_trust_env_false_and_top_level_success(tmp_path, monkeypatch):
+    storage = _storage(tmp_path)
+    manager = LoginManager(storage, repo_root=tmp_path / "repo")
+    calls = {}
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self):
+            return {"success": True, "code": 0, "msg": "success", "data": {}}
+
+    def fake_get(url, headers, timeout, trust_env):
+        calls["trust_env"] = trust_env
+        calls["url"] = url
+        return FakeResponse()
+
+    monkeypatch.setattr(
+        "media_platform.xhs.playwright_sign.sign_with_xhshow",
+        lambda **kwargs: {"x-s": "xs", "x-t": "xt", "x-s-common": "common", "x-b3-traceid": "trace"},
+    )
+    monkeypatch.setattr("mediacrawler_mcp.login_manager.httpx.get", fake_get)
+
+    assert manager._verify_xhs_cookie_remote("web_session=session-value") is True
+    assert calls["trust_env"] is False
+    assert calls["url"].endswith("/api/sns/web/v1/user/selfinfo")
 
 
 def test_import_cookies_rejects_missing_web_session(tmp_path):

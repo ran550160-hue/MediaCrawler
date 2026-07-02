@@ -34,6 +34,19 @@ class LoginManager:
         cookie_path = self.cookie_file_path(platform, account_name)
         cookie_string = self._read_cookie_file(cookie_path)
         if cookie_string and self.extract_web_session(cookie_string):
+            account_row = self.storage.get_account_row(f"{platform}:{account_name}")
+            if not verify_remote and account_row and account_row.get("status") == "expired":
+                return {
+                    "status": "expired",
+                    "platform": platform,
+                    "account_name": account_name,
+                    "login_source": "cookie",
+                    "cookie_file_path": str(cookie_path),
+                    "profile_dir": str(cookie_path.parent),
+                    "last_checked_at": account_row.get("last_checked_at"),
+                    "remote_verified": False,
+                    "message": "XHS cookie was previously marked expired. Re-import a fresh cookie.",
+                }
             if verify_remote and not self._verify_xhs_cookie_remote(cookie_string):
                 self._upsert_account(
                     platform=platform,
@@ -163,6 +176,9 @@ class LoginManager:
     def get_cookie_string(self, platform: str = SUPPORTED_PLATFORM, account_name: str = DEFAULT_ACCOUNT_NAME) -> str | None:
         platform = self._normalize_platform(platform)
         account_name = self._normalize_account_name(account_name)
+        account_row = self.storage.get_account_row(f"{platform}:{account_name}")
+        if account_row and account_row.get("status") == "expired":
+            return None
         cookie_string = self._read_cookie_file(self.cookie_file_path(platform, account_name))
         if cookie_string and self.extract_web_session(cookie_string):
             return cookie_string
@@ -270,11 +286,11 @@ class LoginManager:
                 "x-S-Common": signs["x-s-common"],
                 "X-B3-Traceid": signs["x-b3-traceid"],
             }
-            response = httpx.get(f"{host}{uri}", headers=headers, timeout=15)
+            response = httpx.get(f"{host}{uri}", headers=headers, timeout=15, trust_env=False)
             if response.status_code != 200:
                 return False
             payload = response.json()
-            return bool(payload.get("data", {}).get("result", {}).get("success"))
+            return payload.get("success") is True
         except Exception:
             return False
 

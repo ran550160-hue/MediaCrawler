@@ -251,6 +251,21 @@ def test_start_collection_requires_login_before_starting_runner(tmp_path):
     assert runner.started == {}
 
 
+def test_start_collection_does_not_continue_with_expired_cookie_status(tmp_path):
+    runner = FakeRunner(FakeProcess())
+    dataset, manager, _ = _setup(
+        tmp_path,
+        runner,
+        FakeLoginManager(status="expired", cookie_string=None),
+    )
+
+    with pytest.raises(McpAppError) as exc_info:
+        manager.start_collection(dataset.dataset_id)
+
+    assert exc_info.value.code == ErrorCode.LOGIN_REQUIRED
+    assert runner.started == {}
+
+
 def test_start_collection_uses_imported_cookie_login(tmp_path):
     runner = FakeRunner(FakeProcess(return_code=2))
     dataset, manager, _ = _setup(
