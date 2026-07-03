@@ -230,6 +230,7 @@ def start_qrcode_login(
     account_name: str = "default",
     timeout_seconds: int = 120,
     headless: bool = True,
+    qr_wait_seconds: int = 30,
 ) -> dict[str, Any]:
     """Start an XHS QR-code login task and return a QR image path for Feishu."""
     try:
@@ -238,6 +239,7 @@ def start_qrcode_login(
             account_name=account_name,
             timeout_seconds=timeout_seconds,
             headless=headless,
+            qr_wait_seconds=qr_wait_seconds,
         )
     except McpAppError as exc:
         return exc.to_result()
@@ -278,7 +280,7 @@ def start_collection(
     max_comments_per_content: int = 10,
     include_sub_comments: bool = False,
     headless: bool = True,
-    verify_login_remote: bool = False,
+    verify_login_remote: bool = True,
 ) -> dict[str, Any]:
     """Start an async xhs collection task for a dataset."""
     try:

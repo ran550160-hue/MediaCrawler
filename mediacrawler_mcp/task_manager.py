@@ -36,7 +36,7 @@ class TaskManager:
         max_comments_per_content: int = 10,
         include_sub_comments: bool = False,
         headless: bool = True,
-        verify_login_remote: bool = False,
+        verify_login_remote: bool = True,
     ) -> dict[str, Any]:
         dataset_id = (dataset_id or "").strip()
         if not dataset_id:

@@ -27,13 +27,23 @@ class _FakeLocator:
 
 
 class _FakePage:
-    def __init__(self):
+    def __init__(self, selector_failures: int = 0):
         self.evaluated = False
+        self.reloads = 0
+        self.screenshots: list[str] = []
+        self.url = "https://www.xiaohongshu.com/login"
+        self.selector_failures = selector_failures
 
     async def goto(self, url, wait_until):
+        self.url = url
         return None
 
     async def wait_for_selector(self, selector, timeout):
+        if self.selector_failures > 0:
+            self.selector_failures -= 1
+            from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+
+            raise PlaywrightTimeoutError("QR not ready")
         return _FakeQrElement()
 
     def locator(self, selector):
@@ -42,11 +52,19 @@ class _FakePage:
     async def evaluate(self, script):
         self.evaluated = True
 
+    async def reload(self, wait_until):
+        self.reloads += 1
+
+    async def screenshot(self, path, full_page=True):
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        Path(path).write_bytes(b"error")
+        self.screenshots.append(str(path))
+
 
 class _FakeContext:
-    def __init__(self, cookies):
+    def __init__(self, cookies, selector_failures: int = 0):
         self._cookies = cookies
-        self.page = _FakePage()
+        self.page = _FakePage(selector_failures=selector_failures)
         self.cleared = False
         self.closed = False
 
@@ -260,3 +278,33 @@ def test_qrcode_login_clears_stale_initial_profile_cookie(tmp_path, monkeypatch)
     assert context.cleared is True
     assert context.page.evaluated is True
     assert storage.get_account_row("xhs:default") is None
+
+
+def test_qrcode_login_fails_with_debug_screenshot_when_qr_not_found(tmp_path, monkeypatch):
+    storage = _storage(tmp_path)
+    manager = QRCodeLoginManager(storage, repo_root=tmp_path / "repo")
+    context = _FakeContext([], selector_failures=3)
+    monkeypatch.setattr("mediacrawler_mcp.qrcode_login.async_playwright", lambda: _FakeAsyncPlaywright(context))
+
+    asyncio.run(
+        manager._run_qrcode_login(
+            login_task_id="login-no-qr",
+            account_name="default",
+            qr_image_path=storage.config.login_qrcodes_dir / "login-no-qr.png",
+            profile_dir=tmp_path / "repo" / "browser_data" / "xhs_user_data_dir",
+            expires_at="2099-01-01T00:00:00+00:00",
+            timeout_seconds=30,
+            headless=True,
+            cancel_event=threading.Event(),
+        )
+    )
+
+    result = manager.get_qrcode_login_status("login-no-qr")
+    error_path = storage.config.login_qrcodes_dir / "login-no-qr_error.png"
+    assert result["status"] == "failed"
+    assert result["qr_ready"] is False
+    assert result["qr_image_exists"] is False
+    assert context.page.reloads == 1
+    assert error_path.exists()
+    assert str(error_path) in result["message"]
+    assert "current_url=https://www.xiaohongshu.com" in result["message"]

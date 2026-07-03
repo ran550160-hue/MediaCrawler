@@ -229,6 +229,10 @@ MCP 默认 `MEDIACRAWLER_MCP_BROWSER_MODE=persistent_context`，采集命令会�
 
 更新 QR login 或 collection 相关代码后，需要在 Hermes/Gateway 侧执行 `/reload-mcp` 或重启进程，确保加载到最新 MCP server。
 
+生产环境建议 Hermes/飞书入口调用 `mcp_mediacrawler_start_collection(..., verify_login_remote=true)`，避免本地 cookie 文件存在但实际已过期时继续启动 Playwright。当前 MCP 默认值也是 `true`，只有低频调试或明确要减少远程校验请求时才建议显式传 `false`。
+
+SSH/Xshell 服务器环境建议在启动 Hermes/Gateway 前执行 `unset DISPLAY`，或用 `DISPLAY=` 启动服务，避免 X11 forwarding 触发 Xmanager 弹窗影响 Playwright。
+
 ## 7. 飞书结果路径验证
 
 当前 MCP 报告工具返回本地服务器路径：

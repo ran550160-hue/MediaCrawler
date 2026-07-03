@@ -133,6 +133,7 @@ def test_start_collection_runs_runner_and_archives_outputs(tmp_path):
     assert runner.started["options"].headless is False
     assert runner.started["options"].enable_cdp_mode is False
     assert runner.started["options"].cdp_connect_existing is False
+    assert manager.login_manager.verify_remote_values == [True]
 
     _wait_until(lambda: manager.get_task_status(result["task_id"])["status"] == "ready")
     status = manager.get_task_status(result["task_id"])
@@ -312,14 +313,24 @@ def test_start_collection_uses_imported_cookie_login(tmp_path):
     assert runner.started["options"].cookie_string == "web_session=abc123; a=b"
 
 
-def test_start_collection_can_remote_verify_login_before_runner(tmp_path):
+def test_start_collection_verifies_login_remotely_by_default(tmp_path):
     runner = FakeRunner(FakeProcess(return_code=2))
     login_manager = FakeLoginManager(status="logged_in", cookie_string="web_session=abc123")
     dataset, manager, _ = _setup(tmp_path, runner, login_manager)
 
-    manager.start_collection(dataset.dataset_id, verify_login_remote=True)
+    manager.start_collection(dataset.dataset_id)
 
     assert login_manager.verify_remote_values == [True]
+
+
+def test_start_collection_can_disable_remote_verify(tmp_path):
+    runner = FakeRunner(FakeProcess(return_code=2))
+    login_manager = FakeLoginManager(status="logged_in", cookie_string="web_session=abc123")
+    dataset, manager, _ = _setup(tmp_path, runner, login_manager)
+
+    manager.start_collection(dataset.dataset_id, verify_login_remote=False)
+
+    assert login_manager.verify_remote_values == [False]
 
 
 def test_start_collection_blocks_when_remote_verify_marks_expired(tmp_path):

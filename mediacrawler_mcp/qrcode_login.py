@@ -254,10 +254,18 @@ class QRCodeLoginManager:
                         profile_dir=str(profile_dir),
                         account_name=account_name,
                     )
-                    await page.goto("https://www.xiaohongshu.com", wait_until="domcontentloaded")
 
-                qr_element = await self._find_qr_element(page)
-                await qr_element.screenshot(path=str(qr_image_path))
+                if not await self._prepare_qr_code(page, qr_image_path, login_task_id):
+                    self._update_session(
+                        login_task_id,
+                        status="failed",
+                        message=await self._qr_failure_message(page, login_task_id),
+                        expires_at=expires_at,
+                        qr_image_path=str(qr_image_path),
+                        profile_dir=str(profile_dir),
+                        account_name=account_name,
+                    )
+                    return
                 self._update_session(
                     login_task_id,
                     status="waiting_scan",
@@ -294,10 +302,21 @@ class QRCodeLoginManager:
                             )
                             return
                         await self._clear_stale_browser_state(context, page)
+                        if not await self._prepare_qr_code(page, qr_image_path, login_task_id):
+                            self._update_session(
+                                login_task_id,
+                                status="failed",
+                                message=await self._qr_failure_message(page, login_task_id),
+                                expires_at=expires_at,
+                                qr_image_path=str(qr_image_path),
+                                profile_dir=str(profile_dir),
+                                account_name=account_name,
+                            )
+                            return
                         self._update_session(
                             login_task_id,
                             status="waiting_scan",
-                            message="Observed XHS cookie failed remote verification. Waiting for a valid QR login.",
+                            message="Observed XHS cookie failed remote verification. Refreshed QR code and waiting for a valid login.",
                             expires_at=expires_at,
                             qr_image_path=str(qr_image_path),
                             profile_dir=str(profile_dir),
@@ -317,14 +336,60 @@ class QRCodeLoginManager:
             finally:
                 await context.close()
 
-    async def _find_qr_element(self, page: Any) -> Any:
+    async def _prepare_qr_code(self, page: Any, qr_image_path: Path, login_task_id: str) -> bool:
+        qr_element = await self._find_qr_element(page, timeout_ms=5000, click_login=False)
+        if qr_element is not None:
+            await qr_element.screenshot(path=str(qr_image_path))
+            return True
+
+        try:
+            await page.reload(wait_until="domcontentloaded")
+        except Exception:
+            pass
+
+        qr_element = await self._find_qr_element(page, timeout_ms=5000, click_login=True)
+        if qr_element is not None:
+            await qr_element.screenshot(path=str(qr_image_path))
+            return True
+
+        await self._save_failure_screenshot(page, login_task_id)
+        return False
+
+    async def _find_qr_element(self, page: Any, timeout_ms: int, click_login: bool) -> Any | None:
         selector = "xpath=//img[@class='qrcode-img']"
         try:
-            return await page.wait_for_selector(selector, timeout=5000)
+            return await page.wait_for_selector(selector, timeout=timeout_ms)
         except PlaywrightTimeoutError:
+            pass
+        if not click_login:
+            return None
+        try:
             login_button = page.locator("xpath=//*[@id='app']/div[1]/div[2]/div[1]/ul/div[1]/button")
             await login_button.click(timeout=5000)
             return await page.wait_for_selector(selector, timeout=10000)
+        except PlaywrightTimeoutError:
+            return None
+        except Exception:
+            return None
+
+    async def _save_failure_screenshot(self, page: Any, login_task_id: str) -> Path | None:
+        screenshot_path = self.storage.config.login_qrcodes_dir / f"{login_task_id}_error.png"
+        try:
+            await page.screenshot(path=str(screenshot_path), full_page=True)
+            return screenshot_path
+        except Exception:
+            return None
+
+    async def _qr_failure_message(self, page: Any, login_task_id: str) -> str:
+        screenshot_path = self.storage.config.login_qrcodes_dir / f"{login_task_id}_error.png"
+        try:
+            current_url = page.url
+        except Exception:
+            current_url = "unknown"
+        return (
+            "Failed to locate XHS QR code after clearing stale browser state and retrying login fallback. "
+            f"current_url={current_url}; screenshot_path={screenshot_path}"
+        )
 
     async def _clear_stale_browser_state(self, context: Any, page: Any) -> None:
         try:
