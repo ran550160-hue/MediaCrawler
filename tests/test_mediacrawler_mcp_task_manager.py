@@ -54,11 +54,14 @@ class FakeLoginManager:
     def __init__(self, status="logged_in", cookie_string=None):
         self.status = status
         self.cookie_string = cookie_string
+        self.verify_remote_values = []
 
-    def get_login_status(self, platform):
+    def get_login_status(self, platform, verify_remote=False):
+        self.verify_remote_values.append(verify_remote)
         return {
             "status": self.status,
             "platform": platform,
+            "remote_verified": verify_remote,
             "message": "login required" if self.status != "logged_in" else "ok",
         }
 
@@ -256,7 +259,7 @@ def test_start_collection_rejects_when_xhs_profile_is_busy(tmp_path):
     runner = FakeRunner(FakeProcess())
     dataset, manager, _ = _setup(tmp_path, runner)
     owner = "test:busy"
-    assert acquire_xhs_profile(owner) is True
+    assert acquire_xhs_profile(manager.storage.config, owner) is True
     try:
         with pytest.raises(McpAppError) as exc_info:
             manager.start_collection(dataset.dataset_id)
@@ -274,9 +277,9 @@ def test_start_collection_holds_profile_lock_until_process_finishes(tmp_path):
 
     result = manager.start_collection(dataset.dataset_id)
 
-    assert current_xhs_profile_owner() == f"collection:{result['task_id']}"
+    assert current_xhs_profile_owner(manager.storage.config) == f"collection:{result['task_id']}"
     manager.cancel_task(result["task_id"])
-    _wait_until(lambda: current_xhs_profile_owner() is None)
+    _wait_until(lambda: current_xhs_profile_owner(manager.storage.config) is None)
 
 
 def test_start_collection_does_not_continue_with_expired_cookie_status(tmp_path):
@@ -307,3 +310,26 @@ def test_start_collection_uses_imported_cookie_login(tmp_path):
     assert result["task_id"].startswith("task_collect_xhs_")
     assert runner.started["options"].login_type == "cookie"
     assert runner.started["options"].cookie_string == "web_session=abc123; a=b"
+
+
+def test_start_collection_can_remote_verify_login_before_runner(tmp_path):
+    runner = FakeRunner(FakeProcess(return_code=2))
+    login_manager = FakeLoginManager(status="logged_in", cookie_string="web_session=abc123")
+    dataset, manager, _ = _setup(tmp_path, runner, login_manager)
+
+    manager.start_collection(dataset.dataset_id, verify_login_remote=True)
+
+    assert login_manager.verify_remote_values == [True]
+
+
+def test_start_collection_blocks_when_remote_verify_marks_expired(tmp_path):
+    runner = FakeRunner(FakeProcess())
+    login_manager = FakeLoginManager(status="expired", cookie_string="web_session=abc123")
+    dataset, manager, _ = _setup(tmp_path, runner, login_manager)
+
+    with pytest.raises(McpAppError) as exc_info:
+        manager.start_collection(dataset.dataset_id, verify_login_remote=True)
+
+    assert exc_info.value.code == ErrorCode.LOGIN_REQUIRED
+    assert login_manager.verify_remote_values == [True]
+    assert runner.started == {}

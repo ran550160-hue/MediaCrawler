@@ -214,16 +214,20 @@ MCP 默认 `MEDIACRAWLER_MCP_BROWSER_MODE=persistent_context`，采集命令会�
   "status": "waiting_scan",
   "login_task_id": "task_qrcode_login_xhs_...",
   "qr_image_path": "/data/mediacrawler-mcp/login_qrcodes/task_qrcode_login_xhs_....png",
+  "qr_ready": true,
+  "qr_image_exists": true,
   "expires_at": "..."
 }
 ```
 
-3. Hermes 读取 `qr_image_path` 并上传到飞书，让用户扫码。
+3. 只有当 `status == "waiting_scan"` 且 `qr_ready == true` 时，Hermes 才读取 `qr_image_path` 并上传到飞书，让用户扫码。
 4. Hermes 轮询 `mcp_mediacrawler_get_qrcode_login_status(login_task_id)`。
-5. 返回 `status=success` 后，MCP 已保存 cookie，并且 Playwright persistent profile 已落到 `browser_data/xhs_user_data_dir`。
+5. 返回 `status=success` 后，MCP 已远程验证并保存 cookie，并且 Playwright persistent profile 已落到 `browser_data/xhs_user_data_dir`。建议再调用 `mcp_mediacrawler_get_login_status(verify_remote=true)` 做最终确认。
 6. 用户取消或二维码过期时，调用 `mcp_mediacrawler_cancel_qrcode_login(login_task_id)` 或重新发起二维码登录。
 
-二维码登录和小红书采集共用同一把 XHS browser profile 锁。同一时间只允许一个 XHS collection 或 QR login，避免多个 Playwright 进程抢占 `browser_data/xhs_user_data_dir` 导致 profile lock 或 launch timeout。
+二维码登录和小红书采集共用同一把 XHS browser profile 文件锁。同一时间只允许一个 XHS collection 或 QR login，避免多个 Playwright 进程抢占 `browser_data/xhs_user_data_dir` 导致 profile lock 或 launch timeout。不要在 MCP 任务运行时手工启动另一个直接使用同一 XHS profile 的 `main.py`。
+
+更新 QR login 或 collection 相关代码后，需要在 Hermes/Gateway 侧执行 `/reload-mcp` 或重启进程，确保加载到最新 MCP server。
 
 ## 7. 飞书结果路径验证
 

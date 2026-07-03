@@ -36,6 +36,7 @@ class TaskManager:
         max_comments_per_content: int = 10,
         include_sub_comments: bool = False,
         headless: bool = True,
+        verify_login_remote: bool = False,
     ) -> dict[str, Any]:
         dataset_id = (dataset_id or "").strip()
         if not dataset_id:
@@ -50,7 +51,7 @@ class TaskManager:
         if platforms != ["xhs"]:
             raise McpAppError(ErrorCode.UNSUPPORTED_PLATFORM, "Only xhs collection is supported")
 
-        login_status = self.login_manager.get_login_status("xhs")
+        login_status = self.login_manager.get_login_status("xhs", verify_remote=verify_login_remote)
         if login_status["status"] != "logged_in":
             raise McpAppError(
                 ErrorCode.LOGIN_REQUIRED,
@@ -74,11 +75,11 @@ class TaskManager:
 
         task_id = make_task_id("collect_xhs")
         lock_owner = f"collection:{task_id}"
-        if not acquire_xhs_profile(lock_owner):
+        if not acquire_xhs_profile(self.storage.config, lock_owner):
             raise McpAppError(
                 ErrorCode.RESOURCE_BUSY,
                 "XHS browser profile is busy",
-                f"Current owner: {current_xhs_profile_owner()}",
+                f"Current owner: {current_xhs_profile_owner(self.storage.config)}",
             )
         dataset_dir = Path(dataset["dataset_dir"])
         output_dir = dataset_dir / "logs" / task_id / "output"

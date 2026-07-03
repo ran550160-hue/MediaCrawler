@@ -44,11 +44,11 @@ class QRCodeLoginManager:
         self.storage.initialize()
         login_task_id = make_task_id("qrcode_login_xhs")
         lock_owner = self._lock_owner(login_task_id)
-        if not acquire_xhs_profile(lock_owner):
+        if not acquire_xhs_profile(self.storage.config, lock_owner):
             raise McpAppError(
                 ErrorCode.RESOURCE_BUSY,
                 "XHS browser profile is busy",
-                f"Current owner: {current_xhs_profile_owner()}",
+                f"Current owner: {current_xhs_profile_owner(self.storage.config)}",
             )
 
         qr_image_path = self.storage.config.login_qrcodes_dir / f"{login_task_id}.png"
@@ -216,6 +216,7 @@ class QRCodeLoginManager:
         headless: bool,
         cancel_event: threading.Event,
     ) -> None:
+        self.storage.initialize()
         qr_image_path.parent.mkdir(parents=True, exist_ok=True)
         profile_dir.mkdir(parents=True, exist_ok=True)
         async with async_playwright() as playwright:
@@ -233,8 +234,27 @@ class QRCodeLoginManager:
                 await page.goto("https://www.xiaohongshu.com", wait_until="domcontentloaded")
                 initial_cookie = self._cookie_string(await context.cookies())
                 if LoginManager.extract_web_session(initial_cookie):
-                    self._save_success_cookie(login_task_id, account_name, initial_cookie, profile_dir, expires_at, qr_image_path)
-                    return
+                    if self._verify_cookie_remote(initial_cookie):
+                        self._save_success_cookie(
+                            login_task_id,
+                            account_name,
+                            initial_cookie,
+                            profile_dir,
+                            expires_at,
+                            qr_image_path,
+                        )
+                        return
+                    await self._clear_stale_browser_state(context, page)
+                    self._update_session(
+                        login_task_id,
+                        status="initializing",
+                        message="Existing XHS profile cookie failed remote verification. Cleared stale browser state and waiting for QR code.",
+                        expires_at=expires_at,
+                        qr_image_path=str(qr_image_path),
+                        profile_dir=str(profile_dir),
+                        account_name=account_name,
+                    )
+                    await page.goto("https://www.xiaohongshu.com", wait_until="domcontentloaded")
 
                 qr_element = await self._find_qr_element(page)
                 await qr_element.screenshot(path=str(qr_image_path))
@@ -263,8 +283,26 @@ class QRCodeLoginManager:
                         return
                     cookie_string = self._cookie_string(await context.cookies())
                     if LoginManager.extract_web_session(cookie_string):
-                        self._save_success_cookie(login_task_id, account_name, cookie_string, profile_dir, expires_at, qr_image_path)
-                        return
+                        if self._verify_cookie_remote(cookie_string):
+                            self._save_success_cookie(
+                                login_task_id,
+                                account_name,
+                                cookie_string,
+                                profile_dir,
+                                expires_at,
+                                qr_image_path,
+                            )
+                            return
+                        await self._clear_stale_browser_state(context, page)
+                        self._update_session(
+                            login_task_id,
+                            status="waiting_scan",
+                            message="Observed XHS cookie failed remote verification. Waiting for a valid QR login.",
+                            expires_at=expires_at,
+                            qr_image_path=str(qr_image_path),
+                            profile_dir=str(profile_dir),
+                            account_name=account_name,
+                        )
                     await asyncio.sleep(1)
 
                 self._update_session(
@@ -287,6 +325,19 @@ class QRCodeLoginManager:
             login_button = page.locator("xpath=//*[@id='app']/div[1]/div[2]/div[1]/ul/div[1]/button")
             await login_button.click(timeout=5000)
             return await page.wait_for_selector(selector, timeout=10000)
+
+    async def _clear_stale_browser_state(self, context: Any, page: Any) -> None:
+        try:
+            await context.clear_cookies()
+        except Exception:
+            pass
+        try:
+            await page.evaluate("() => { localStorage.clear(); sessionStorage.clear(); }")
+        except Exception:
+            pass
+
+    def _verify_cookie_remote(self, cookie_string: str) -> bool:
+        return LoginManager(self.storage, repo_root=self.repo_root)._verify_xhs_cookie_remote(cookie_string)
 
     def _save_success_cookie(
         self,
@@ -356,12 +407,17 @@ class QRCodeLoginManager:
                 "message": "QR login session was not created",
                 "error": {"code": ErrorCode.INTERNAL_ERROR, "detail": "missing login session row"},
             }
+        qr_image_path = row["qr_image_path"]
+        qr_image_exists = bool(qr_image_path and Path(qr_image_path).exists())
+        qr_ready = row["status"] == "waiting_scan" and qr_image_exists
         return {
             "status": row["status"],
             "login_task_id": row["login_session_id"],
             "platform": row["platform"],
             "account_name": row["account_name"],
-            "qr_image_path": row["qr_image_path"],
+            "qr_image_path": qr_image_path,
+            "qr_ready": qr_ready,
+            "qr_image_exists": qr_image_exists,
             "profile_dir": row["profile_dir"],
             "expires_at": row["expires_at"],
             "message": row["message"],

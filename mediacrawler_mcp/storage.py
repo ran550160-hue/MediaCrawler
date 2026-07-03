@@ -114,6 +114,7 @@ class Storage:
         self.config.logs_dir.mkdir(parents=True, exist_ok=True)
         self.config.accounts_dir.mkdir(parents=True, exist_ok=True)
         self.config.login_qrcodes_dir.mkdir(parents=True, exist_ok=True)
+        self.config.locks_dir.mkdir(parents=True, exist_ok=True)
         with self.connect() as conn:
             conn.execute("PRAGMA journal_mode=WAL")
             for statement in SCHEMA_STATEMENTS:

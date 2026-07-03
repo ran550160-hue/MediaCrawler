@@ -37,6 +37,10 @@ class McpConfig:
         return self.home / "login_qrcodes"
 
     @property
+    def locks_dir(self) -> Path:
+        return self.home / "locks"
+
+    @property
     def metadata_db_path(self) -> Path:
         return self.home / "metadata.sqlite"
 

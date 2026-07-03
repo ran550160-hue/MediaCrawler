@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 import threading
 import time
@@ -12,6 +13,79 @@ from mediacrawler_mcp.locks import acquire_xhs_profile, current_xhs_profile_owne
 from mediacrawler_mcp.qrcode_login import QRCodeLoginManager
 from mediacrawler_mcp.storage import Storage
 from mediacrawler_mcp.utils import utc_now_iso
+
+
+class _FakeQrElement:
+    async def screenshot(self, path):
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        Path(path).write_bytes(b"png")
+
+
+class _FakeLocator:
+    async def click(self, timeout):
+        return None
+
+
+class _FakePage:
+    def __init__(self):
+        self.evaluated = False
+
+    async def goto(self, url, wait_until):
+        return None
+
+    async def wait_for_selector(self, selector, timeout):
+        return _FakeQrElement()
+
+    def locator(self, selector):
+        return _FakeLocator()
+
+    async def evaluate(self, script):
+        self.evaluated = True
+
+
+class _FakeContext:
+    def __init__(self, cookies):
+        self._cookies = cookies
+        self.page = _FakePage()
+        self.cleared = False
+        self.closed = False
+
+    async def new_page(self):
+        return self.page
+
+    async def cookies(self):
+        return list(self._cookies)
+
+    async def clear_cookies(self):
+        self.cleared = True
+        self._cookies = []
+
+    async def close(self):
+        self.closed = True
+
+
+class _FakeChromium:
+    def __init__(self, context):
+        self.context = context
+
+    async def launch_persistent_context(self, **kwargs):
+        return self.context
+
+
+class _FakePlaywright:
+    def __init__(self, context):
+        self.chromium = _FakeChromium(context)
+
+
+class _FakeAsyncPlaywright:
+    def __init__(self, context):
+        self.context = context
+
+    async def __aenter__(self):
+        return _FakePlaywright(self.context)
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
 
 
 def _storage(tmp_path):
@@ -58,22 +132,25 @@ def test_start_qrcode_login_returns_qr_path_and_status(tmp_path, monkeypatch):
         assert result["status"] == "waiting_scan"
         assert result["login_task_id"].startswith("task_qrcode_login_xhs_")
         assert Path(result["qr_image_path"]).exists()
+        assert result["qr_ready"] is True
+        assert result["qr_image_exists"] is True
         status = manager.get_qrcode_login_status(result["login_task_id"])
         assert status["status"] == "waiting_scan"
+        assert status["qr_ready"] is True
     finally:
         manager.cancel_qrcode_login(result["login_task_id"])
 
     deadline = time.time() + 3
-    while current_xhs_profile_owner() is not None and time.time() < deadline:
+    while current_xhs_profile_owner(storage.config) is not None and time.time() < deadline:
         time.sleep(0.02)
-    assert current_xhs_profile_owner() is None
+    assert current_xhs_profile_owner(storage.config) is None
 
 
 def test_start_qrcode_login_rejects_when_profile_busy(tmp_path):
     storage = _storage(tmp_path)
     manager = QRCodeLoginManager(storage, repo_root=tmp_path / "repo")
     owner = "test:qrcode-busy"
-    assert acquire_xhs_profile(owner) is True
+    assert acquire_xhs_profile(storage.config, owner) is True
     try:
         with pytest.raises(McpAppError) as exc_info:
             manager.start_qrcode_login(qr_wait_seconds=1)
@@ -113,9 +190,9 @@ def test_cancel_qrcode_login_marks_session_cancelled_and_releases_lock(tmp_path,
 
     assert cancelled["status"] == "cancelled"
     deadline = time.time() + 3
-    while current_xhs_profile_owner() is not None and time.time() < deadline:
+    while current_xhs_profile_owner(storage.config) is not None and time.time() < deadline:
         time.sleep(0.02)
-    assert current_xhs_profile_owner() is None
+    assert current_xhs_profile_owner(storage.config) is None
 
 
 def test_qrcode_login_rejects_unsupported_platform(tmp_path):
@@ -126,3 +203,60 @@ def test_qrcode_login_rejects_unsupported_platform(tmp_path):
         manager.start_qrcode_login(platform="dy")
 
     assert exc_info.value.code == ErrorCode.UNSUPPORTED_PLATFORM
+
+
+def test_qrcode_login_accepts_initial_cookie_only_after_remote_verify(tmp_path, monkeypatch):
+    storage = _storage(tmp_path)
+    manager = QRCodeLoginManager(storage, repo_root=tmp_path / "repo")
+    context = _FakeContext([{"name": "web_session", "value": "fresh-session"}])
+    monkeypatch.setattr("mediacrawler_mcp.qrcode_login.async_playwright", lambda: _FakeAsyncPlaywright(context))
+    monkeypatch.setattr(manager, "_verify_cookie_remote", lambda cookie: True)
+
+    asyncio.run(
+        manager._run_qrcode_login(
+            login_task_id="login-valid",
+            account_name="default",
+            qr_image_path=storage.config.login_qrcodes_dir / "login-valid.png",
+            profile_dir=tmp_path / "repo" / "browser_data" / "xhs_user_data_dir",
+            expires_at="2099-01-01T00:00:00+00:00",
+            timeout_seconds=0,
+            headless=True,
+            cancel_event=threading.Event(),
+        )
+    )
+
+    result = manager.get_qrcode_login_status("login-valid")
+    assert result["status"] == "success"
+    assert result["qr_ready"] is False
+    assert result["qr_image_exists"] is False
+    assert context.cleared is False
+    assert storage.get_account_row("xhs:default")["status"] == "logged_in"
+
+
+def test_qrcode_login_clears_stale_initial_profile_cookie(tmp_path, monkeypatch):
+    storage = _storage(tmp_path)
+    manager = QRCodeLoginManager(storage, repo_root=tmp_path / "repo")
+    context = _FakeContext([{"name": "web_session", "value": "stale-session"}])
+    monkeypatch.setattr("mediacrawler_mcp.qrcode_login.async_playwright", lambda: _FakeAsyncPlaywright(context))
+    monkeypatch.setattr(manager, "_verify_cookie_remote", lambda cookie: False)
+
+    asyncio.run(
+        manager._run_qrcode_login(
+            login_task_id="login-stale",
+            account_name="default",
+            qr_image_path=storage.config.login_qrcodes_dir / "login-stale.png",
+            profile_dir=tmp_path / "repo" / "browser_data" / "xhs_user_data_dir",
+            expires_at="2099-01-01T00:00:00+00:00",
+            timeout_seconds=0,
+            headless=True,
+            cancel_event=threading.Event(),
+        )
+    )
+
+    result = manager.get_qrcode_login_status("login-stale")
+    assert result["status"] == "expired"
+    assert result["qr_ready"] is False
+    assert result["qr_image_exists"] is True
+    assert context.cleared is True
+    assert context.page.evaluated is True
+    assert storage.get_account_row("xhs:default") is None
