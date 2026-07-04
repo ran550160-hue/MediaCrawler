@@ -25,6 +25,7 @@ class CollectionOptions:
     cookie_string: str | None = None
     enable_cdp_mode: bool = False
     cdp_connect_existing: bool = False
+    cdp_debug_port: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -37,6 +38,7 @@ class CollectionOptions:
             "cookie_present": bool(self.cookie_string),
             "enable_cdp_mode": self.enable_cdp_mode,
             "cdp_connect_existing": self.cdp_connect_existing,
+            "cdp_debug_port": self.cdp_debug_port,
         }
 
 
@@ -80,6 +82,8 @@ class CrawlerRunner:
             "--cdp_connect_existing",
             str(options.cdp_connect_existing).lower(),
         ]
+        if options.cdp_debug_port:
+            command.extend(["--cdp_debug_port", str(options.cdp_debug_port)])
         if options.cookie_string:
             command.extend(["--cookies", options.cookie_string])
         return command

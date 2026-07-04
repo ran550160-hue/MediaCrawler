@@ -25,6 +25,7 @@ class LoginManager:
         platform: str = SUPPORTED_PLATFORM,
         account_name: str = DEFAULT_ACCOUNT_NAME,
         verify_remote: bool = False,
+        verify_permission: bool = False,
     ) -> dict[str, Any]:
         platform = self._normalize_platform(platform)
         account_name = self._normalize_account_name(account_name)
@@ -45,6 +46,9 @@ class LoginManager:
                     "profile_dir": str(cookie_path.parent),
                     "last_checked_at": account_row.get("last_checked_at"),
                     "remote_verified": False,
+                    "permission_verified": False,
+                    "can_collect": False,
+                    "error_code": "COOKIE_EXPIRED",
                     "message": "XHS cookie was previously marked expired. Re-import a fresh cookie.",
                 }
             if verify_remote and not self._verify_xhs_cookie_remote(cookie_string):
@@ -65,8 +69,38 @@ class LoginManager:
                     "profile_dir": str(cookie_path.parent),
                     "last_checked_at": now,
                     "remote_verified": False,
+                    "permission_verified": False,
+                    "can_collect": False,
+                    "error_code": "COOKIE_EXPIRED",
                     "message": "XHS cookie exists but remote selfinfo verification failed. Re-import a fresh cookie.",
                 }
+            permission = {"status": "skipped", "can_collect": None, "error_code": None, "message": None}
+            if verify_permission:
+                permission = self._verify_xhs_collect_permission(cookie_string)
+                if not permission["can_collect"]:
+                    status = "permission_denied" if permission["error_code"] == "XHS_PERMISSION_DENIED" else "limited"
+                    self._upsert_account(
+                        platform=platform,
+                        account_name=account_name,
+                        profile_dir=str(cookie_path.parent),
+                        status=status,
+                        last_login_at=None,
+                        last_checked_at=now,
+                    )
+                    return {
+                        "status": status,
+                        "platform": platform,
+                        "account_name": account_name,
+                        "login_source": "cookie",
+                        "cookie_file_path": str(cookie_path),
+                        "profile_dir": str(cookie_path.parent),
+                        "last_checked_at": now,
+                        "remote_verified": verify_remote,
+                        "permission_verified": True,
+                        "can_collect": False,
+                        "error_code": permission["error_code"],
+                        "message": permission["message"],
+                    }
             self._upsert_account(
                 platform=platform,
                 account_name=account_name,
@@ -84,8 +118,13 @@ class LoginManager:
                 "profile_dir": str(cookie_path.parent),
                 "last_checked_at": now,
                 "remote_verified": verify_remote,
+                "permission_verified": verify_permission,
+                "can_collect": permission["can_collect"] if verify_permission else None,
+                "error_code": None,
                 "message": (
-                    "XHS cookie remote verification succeeded."
+                    "XHS cookie remote and permission verification succeeded."
+                    if verify_remote and verify_permission
+                    else "XHS cookie remote verification succeeded."
                     if verify_remote
                     else "XHS cookie with web_session is available. Remote validation was not requested."
                 ),
@@ -97,12 +136,12 @@ class LoginManager:
                 platform=platform,
                 account_name=account_name,
                 profile_dir=str(profile_dir),
-                status="logged_in",
+                status="unknown",
                 last_login_at=None,
                 last_checked_at=now,
             )
             return {
-                "status": "logged_in",
+                "status": "unknown",
                 "platform": platform,
                 "account_name": account_name,
                 "login_source": "browser_profile",
@@ -110,7 +149,10 @@ class LoginManager:
                 "profile_dir": str(profile_dir),
                 "last_checked_at": now,
                 "remote_verified": False,
-                "message": "Detected a local XHS browser profile. Live remote validation is not performed in this sprint.",
+                "permission_verified": False,
+                "can_collect": None,
+                "error_code": "PROFILE_NOT_VERIFIED",
+                "message": "Detected a local XHS browser profile, but no remotely verified cookie is available.",
             }
 
         self._upsert_account(
@@ -130,6 +172,9 @@ class LoginManager:
             "profile_dir": None,
             "last_checked_at": now,
             "remote_verified": False,
+            "permission_verified": False,
+            "can_collect": False,
+            "error_code": "LOGIN_REQUIRED",
             "message": self.manual_login_message(),
         }
 
@@ -177,7 +222,7 @@ class LoginManager:
         platform = self._normalize_platform(platform)
         account_name = self._normalize_account_name(account_name)
         account_row = self.storage.get_account_row(f"{platform}:{account_name}")
-        if account_row and account_row.get("status") == "expired":
+        if account_row and account_row.get("status") in {"expired", "permission_denied", "limited"}:
             return None
         cookie_string = self._read_cookie_file(self.cookie_file_path(platform, account_name))
         if cookie_string and self.extract_web_session(cookie_string):
@@ -293,6 +338,70 @@ class LoginManager:
             return payload.get("success") is True
         except Exception:
             return False
+
+    def _verify_xhs_collect_permission(self, cookie_string: str) -> dict[str, Any]:
+        uri = "/api/sns/web/v1/search/notes"
+        host = "https://edith.xiaohongshu.com"
+        data = {
+            "keyword": "test",
+            "page": 1,
+            "page_size": 1,
+            "search_id": "mcp_preflight",
+            "sort": "general",
+            "note_type": 0,
+        }
+        try:
+            import json
+
+            from media_platform.xhs.playwright_sign import sign_with_xhshow
+
+            signs = sign_with_xhshow(uri=uri, data=data, cookie_str=cookie_string, method="POST")
+            headers = {
+                "accept": "application/json, text/plain, */*",
+                "accept-language": "zh-CN,zh;q=0.9",
+                "cache-control": "no-cache",
+                "content-type": "application/json;charset=UTF-8",
+                "origin": "https://www.xiaohongshu.com",
+                "pragma": "no-cache",
+                "referer": "https://www.xiaohongshu.com/",
+                "user-agent": (
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36"
+                ),
+                "Cookie": cookie_string,
+                "X-S": signs["x-s"],
+                "X-T": signs["x-t"],
+                "x-S-Common": signs["x-s-common"],
+                "X-B3-Traceid": signs["x-b3-traceid"],
+            }
+            response = httpx.post(
+                f"{host}{uri}",
+                headers=headers,
+                data=json.dumps(data, separators=(",", ":"), ensure_ascii=False),
+                timeout=15,
+                trust_env=False,
+            )
+            if response.status_code in (461, 471):
+                return {
+                    "status": "failed",
+                    "can_collect": False,
+                    "error_code": "XHS_RISK_CONTROL",
+                    "message": "XHS risk control or CAPTCHA appeared during permission preflight.",
+                }
+            payload = response.json()
+            if payload.get("success") is True:
+                return {"status": "success", "can_collect": True, "error_code": None, "message": None}
+            message = payload.get("msg") or response.text
+            if "权限" in message or "permission" in message.lower():
+                return {
+                    "status": "failed",
+                    "can_collect": False,
+                    "error_code": "XHS_PERMISSION_DENIED",
+                    "message": message,
+                }
+            return {"status": "failed", "can_collect": False, "error_code": "XHS_LIMITED", "message": message}
+        except Exception as exc:
+            return {"status": "failed", "can_collect": False, "error_code": "UNKNOWN", "message": str(exc)}
 
     @staticmethod
     def extract_web_session(cookie_string: str) -> str | None:

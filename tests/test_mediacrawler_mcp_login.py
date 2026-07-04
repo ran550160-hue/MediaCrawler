@@ -42,10 +42,12 @@ def test_get_login_status_detects_local_browser_profile(tmp_path):
 
     status = manager.get_login_status("xhs")
 
-    assert status["status"] == "logged_in"
+    assert status["status"] == "unknown"
     assert status["login_source"] == "browser_profile"
     assert status["profile_dir"] == str(profile_dir)
-    assert storage.get_account_row("xhs:default")["status"] == "logged_in"
+    assert status["can_collect"] is None
+    assert status["error_code"] == "PROFILE_NOT_VERIFIED"
+    assert storage.get_account_row("xhs:default")["status"] == "unknown"
 
 
 def test_import_cookies_stores_cookie_and_account_record(tmp_path):
@@ -82,6 +84,50 @@ def test_get_login_status_can_remote_verify_cookie(tmp_path, monkeypatch):
 
     assert status["status"] == "logged_in"
     assert status["remote_verified"] is True
+    assert status["permission_verified"] is False
+
+
+def test_get_login_status_can_verify_collect_permission(tmp_path, monkeypatch):
+    storage = _storage(tmp_path)
+    manager = LoginManager(storage, repo_root=tmp_path / "repo")
+    manager.import_cookies("xhs", "a=b; web_session=session-value; c=d")
+    monkeypatch.setattr(manager, "_verify_xhs_cookie_remote", lambda cookie: True)
+    monkeypatch.setattr(
+        manager,
+        "_verify_xhs_collect_permission",
+        lambda cookie: {"status": "success", "can_collect": True, "error_code": None, "message": None},
+    )
+
+    status = manager.get_login_status("xhs", verify_remote=True, verify_permission=True)
+
+    assert status["status"] == "logged_in"
+    assert status["permission_verified"] is True
+    assert status["can_collect"] is True
+
+
+def test_get_login_status_reports_permission_denied(tmp_path, monkeypatch):
+    storage = _storage(tmp_path)
+    manager = LoginManager(storage, repo_root=tmp_path / "repo")
+    manager.import_cookies("xhs", "a=b; web_session=session-value; c=d")
+    monkeypatch.setattr(manager, "_verify_xhs_cookie_remote", lambda cookie: True)
+    monkeypatch.setattr(
+        manager,
+        "_verify_xhs_collect_permission",
+        lambda cookie: {
+            "status": "failed",
+            "can_collect": False,
+            "error_code": "XHS_PERMISSION_DENIED",
+            "message": "您当前登录的账号没有权限访问",
+        },
+    )
+
+    status = manager.get_login_status("xhs", verify_remote=True, verify_permission=True)
+
+    assert status["status"] == "permission_denied"
+    assert status["permission_verified"] is True
+    assert status["can_collect"] is False
+    assert status["error_code"] == "XHS_PERMISSION_DENIED"
+    assert manager.get_cookie_string("xhs") is None
 
 
 def test_get_login_status_marks_cookie_expired_when_remote_verify_fails(tmp_path, monkeypatch):

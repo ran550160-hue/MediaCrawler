@@ -243,6 +243,15 @@ async def parse_cmd(argv: Optional[Sequence[str]] = None):
                 show_default=True,
             ),
         ] = str(config.CDP_CONNECT_EXISTING),
+        cdp_debug_port: Annotated[
+            int,
+            typer.Option(
+                "--cdp_debug_port",
+                help="CDP remote debugging port",
+                rich_help_panel="Runtime Configuration",
+                show_default=True,
+            ),
+        ] = config.CDP_DEBUG_PORT,
         save_data_option: Annotated[
             SaveDataOptionEnum,
             typer.Option(
@@ -377,6 +386,7 @@ async def parse_cmd(argv: Optional[Sequence[str]] = None):
         config.CDP_HEADLESS = enable_headless
         config.ENABLE_CDP_MODE = enable_cdp_mode_value
         config.CDP_CONNECT_EXISTING = cdp_connect_existing_value
+        config.CDP_DEBUG_PORT = cdp_debug_port
         config.SAVE_DATA_OPTION = save_data_option.value
         config.COOKIES = cookies
         config.CRAWLER_MAX_COMMENTS_COUNT_SINGLENOTES = max_comments_count_singlenotes

@@ -60,6 +60,10 @@ SCHEMA_STATEMENTS = (
       profile_dir TEXT,
       expires_at TEXT,
       message TEXT,
+      pid INTEGER,
+      worker_log_path TEXT,
+      error_code TEXT,
+      error_message TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     )
@@ -119,7 +123,27 @@ class Storage:
             conn.execute("PRAGMA journal_mode=WAL")
             for statement in SCHEMA_STATEMENTS:
                 conn.execute(statement)
+            self._apply_migrations(conn)
             conn.commit()
+
+    def _apply_migrations(self, conn: sqlite3.Connection) -> None:
+        self._ensure_columns(
+            conn,
+            "login_sessions",
+            {
+                "pid": "INTEGER",
+                "worker_log_path": "TEXT",
+                "error_code": "TEXT",
+                "error_message": "TEXT",
+            },
+        )
+
+    @staticmethod
+    def _ensure_columns(conn: sqlite3.Connection, table_name: str, columns: dict[str, str]) -> None:
+        existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()}
+        for column_name, column_type in columns.items():
+            if column_name not in existing:
+                conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}")
 
     def upsert_dataset(self, dataset: Dataset) -> None:
         payload = dataset.to_dict()
@@ -400,6 +424,10 @@ class Storage:
         message: str | None,
         created_at: str,
         updated_at: str,
+        pid: int | None = None,
+        worker_log_path: str | None = None,
+        error_code: str | None = None,
+        error_message: str | None = None,
     ) -> None:
         with self.connect() as conn:
             conn.execute(
@@ -407,9 +435,10 @@ class Storage:
                 INSERT INTO login_sessions (
                     login_session_id, platform, account_name, status,
                     qr_image_path, profile_dir, expires_at, message,
+                    pid, worker_log_path, error_code, error_message,
                     created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(login_session_id) DO UPDATE SET
                     platform=excluded.platform,
                     account_name=excluded.account_name,
@@ -418,6 +447,10 @@ class Storage:
                     profile_dir=excluded.profile_dir,
                     expires_at=excluded.expires_at,
                     message=excluded.message,
+                    pid=COALESCE(excluded.pid, login_sessions.pid),
+                    worker_log_path=COALESCE(excluded.worker_log_path, login_sessions.worker_log_path),
+                    error_code=excluded.error_code,
+                    error_message=excluded.error_message,
                     updated_at=excluded.updated_at
                 """,
                 (
@@ -429,6 +462,10 @@ class Storage:
                     profile_dir,
                     expires_at,
                     message,
+                    pid,
+                    worker_log_path,
+                    error_code,
+                    error_message,
                     created_at,
                     updated_at,
                 ),

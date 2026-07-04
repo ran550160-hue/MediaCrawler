@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-import threading
 import time
 
 import pytest
@@ -10,9 +9,14 @@ import pytest
 from mediacrawler_mcp.config import McpConfig
 from mediacrawler_mcp.errors import ErrorCode, McpAppError
 from mediacrawler_mcp.locks import acquire_xhs_profile, current_xhs_profile_owner, release_xhs_profile
+from mediacrawler_mcp.login_manager import LoginManager
 from mediacrawler_mcp.qrcode_login import QRCodeLoginManager
 from mediacrawler_mcp.storage import Storage
 from mediacrawler_mcp.utils import utc_now_iso
+
+
+class _FakeProcess:
+    pid = 9876
 
 
 class _FakeQrElement:
@@ -121,7 +125,7 @@ def test_start_qrcode_login_returns_qr_path_and_status(tmp_path, monkeypatch):
     storage = _storage(tmp_path)
     manager = QRCodeLoginManager(storage, repo_root=tmp_path / "repo")
 
-    def fake_start_background_worker(**kwargs):
+    def fake_start_worker_process(**kwargs):
         Path(kwargs["qr_image_path"]).parent.mkdir(parents=True, exist_ok=True)
         Path(kwargs["qr_image_path"]).write_bytes(b"png")
         row = storage.get_login_session_row(kwargs["login_task_id"])
@@ -136,13 +140,12 @@ def test_start_qrcode_login_returns_qr_path_and_status(tmp_path, monkeypatch):
             message="QR ready",
             created_at=row["created_at"],
             updated_at=utc_now_iso(),
+            pid=_FakeProcess.pid,
+            worker_log_path=str(kwargs["worker_log_path"]),
         )
-        threading.Thread(
-            target=lambda: (kwargs["cancel_event"].wait(2), release_xhs_profile(kwargs["lock_owner"])),
-            daemon=True,
-        ).start()
+        return _FakeProcess()
 
-    monkeypatch.setattr(manager, "_start_background_worker", fake_start_background_worker)
+    monkeypatch.setattr(manager, "_start_worker_process", fake_start_worker_process)
 
     result = manager.start_qrcode_login(qr_wait_seconds=1)
 
@@ -152,6 +155,7 @@ def test_start_qrcode_login_returns_qr_path_and_status(tmp_path, monkeypatch):
         assert Path(result["qr_image_path"]).exists()
         assert result["qr_ready"] is True
         assert result["qr_image_exists"] is True
+        assert result["worker_pid"] == _FakeProcess.pid
         status = manager.get_qrcode_login_status(result["login_task_id"])
         assert status["status"] == "waiting_scan"
         assert status["qr_ready"] is True
@@ -182,7 +186,7 @@ def test_cancel_qrcode_login_marks_session_cancelled_and_releases_lock(tmp_path,
     storage = _storage(tmp_path)
     manager = QRCodeLoginManager(storage, repo_root=tmp_path / "repo")
 
-    def fake_start_background_worker(**kwargs):
+    def fake_start_worker_process(**kwargs):
         row = storage.get_login_session_row(kwargs["login_task_id"])
         storage.upsert_login_session(
             login_session_id=kwargs["login_task_id"],
@@ -195,13 +199,13 @@ def test_cancel_qrcode_login_marks_session_cancelled_and_releases_lock(tmp_path,
             message="QR ready",
             created_at=row["created_at"],
             updated_at=utc_now_iso(),
+            pid=_FakeProcess.pid,
+            worker_log_path=str(kwargs["worker_log_path"]),
         )
-        threading.Thread(
-            target=lambda: (kwargs["cancel_event"].wait(2), release_xhs_profile(kwargs["lock_owner"])),
-            daemon=True,
-        ).start()
+        return _FakeProcess()
 
-    monkeypatch.setattr(manager, "_start_background_worker", fake_start_background_worker)
+    monkeypatch.setattr(manager, "_start_worker_process", fake_start_worker_process)
+    monkeypatch.setattr(manager, "_terminate_worker", lambda pid: None)
 
     started = manager.start_qrcode_login(qr_wait_seconds=1)
     cancelled = manager.cancel_qrcode_login(started["login_task_id"])
@@ -223,6 +227,32 @@ def test_qrcode_login_rejects_unsupported_platform(tmp_path):
     assert exc_info.value.code == ErrorCode.UNSUPPORTED_PLATFORM
 
 
+def test_get_qrcode_login_status_repairs_waiting_scan_when_cookie_verified(tmp_path, monkeypatch):
+    storage = _storage(tmp_path)
+    manager = QRCodeLoginManager(storage, repo_root=tmp_path / "repo")
+    LoginManager(storage, repo_root=tmp_path / "repo").import_cookies("xhs", "web_session=fresh; a=b")
+    monkeypatch.setattr(LoginManager, "_verify_xhs_cookie_remote", lambda self, cookie: True)
+    now = utc_now_iso()
+    storage.upsert_login_session(
+        login_session_id="task_qrcode_login_xhs_repair",
+        platform="xhs",
+        account_name="default",
+        status="waiting_scan",
+        qr_image_path=str(storage.config.login_qrcodes_dir / "repair.png"),
+        profile_dir=str(tmp_path / "repo" / "browser_data" / "xhs_user_data_dir"),
+        expires_at="2099-01-01T00:00:00+00:00",
+        message="QR ready",
+        created_at=now,
+        updated_at=now,
+        pid=999999,
+    )
+
+    result = manager.get_qrcode_login_status("task_qrcode_login_xhs_repair")
+
+    assert result["status"] == "success"
+    assert "repaired" in result["message"]
+
+
 def test_qrcode_login_accepts_initial_cookie_only_after_remote_verify(tmp_path, monkeypatch):
     storage = _storage(tmp_path)
     manager = QRCodeLoginManager(storage, repo_root=tmp_path / "repo")
@@ -239,7 +269,6 @@ def test_qrcode_login_accepts_initial_cookie_only_after_remote_verify(tmp_path, 
             expires_at="2099-01-01T00:00:00+00:00",
             timeout_seconds=0,
             headless=True,
-            cancel_event=threading.Event(),
         )
     )
 
@@ -267,7 +296,6 @@ def test_qrcode_login_clears_stale_initial_profile_cookie(tmp_path, monkeypatch)
             expires_at="2099-01-01T00:00:00+00:00",
             timeout_seconds=0,
             headless=True,
-            cancel_event=threading.Event(),
         )
     )
 
@@ -295,7 +323,6 @@ def test_qrcode_login_fails_with_debug_screenshot_when_qr_not_found(tmp_path, mo
             expires_at="2099-01-01T00:00:00+00:00",
             timeout_seconds=30,
             headless=True,
-            cancel_event=threading.Event(),
         )
     )
 

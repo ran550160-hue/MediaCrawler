@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
-import threading
+import os
+import signal
+import subprocess
+import sys
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -18,8 +21,6 @@ from mediacrawler_mcp.storage import Storage
 from mediacrawler_mcp.utils import make_task_id, utc_now_iso
 
 
-_CANCEL_EVENTS: dict[str, threading.Event] = {}
-_EVENTS_GUARD = threading.Lock()
 TERMINAL_STATUSES = {"success", "failed", "cancelled", "expired"}
 
 
@@ -50,9 +51,11 @@ class QRCodeLoginManager:
                 "XHS browser profile is busy",
                 f"Current owner: {current_xhs_profile_owner(self.storage.config)}",
             )
+        release_xhs_profile(lock_owner)
 
         qr_image_path = self.storage.config.login_qrcodes_dir / f"{login_task_id}.png"
         profile_dir = self.repo_root / "browser_data" / "xhs_user_data_dir"
+        worker_log_path = self.storage.config.logs_dir / f"{login_task_id}.log"
         expires_at = (
             datetime.now(timezone.utc).replace(microsecond=0) + timedelta(seconds=timeout_seconds)
         ).isoformat()
@@ -68,21 +71,30 @@ class QRCodeLoginManager:
             message="Starting XHS QR login browser",
             created_at=now,
             updated_at=now,
+            worker_log_path=str(worker_log_path),
         )
 
-        cancel_event = threading.Event()
-        with _EVENTS_GUARD:
-            _CANCEL_EVENTS[login_task_id] = cancel_event
-        self._start_background_worker(
+        process = self._start_worker_process(
             login_task_id=login_task_id,
             account_name=account_name,
             qr_image_path=qr_image_path,
             profile_dir=profile_dir,
+            worker_log_path=worker_log_path,
             expires_at=expires_at,
             timeout_seconds=timeout_seconds,
             headless=headless,
-            cancel_event=cancel_event,
-            lock_owner=lock_owner,
+        )
+        current = self.storage.get_login_session_row(login_task_id) or {}
+        self._update_session(
+            login_task_id,
+            status=current.get("status") or "initializing",
+            message=current.get("message") or "Started XHS QR login worker",
+            expires_at=expires_at,
+            qr_image_path=current.get("qr_image_path") or str(qr_image_path),
+            profile_dir=current.get("profile_dir") or str(profile_dir),
+            account_name=account_name,
+            pid=process.pid,
+            worker_log_path=str(worker_log_path),
         )
 
         deadline = time.time() + qr_wait_seconds
@@ -102,6 +114,7 @@ class QRCodeLoginManager:
         row = self.storage.get_login_session_row(login_task_id)
         if row is None:
             raise McpAppError(ErrorCode.TASK_NOT_FOUND, "Login task not found", f"login_task_id={login_task_id}")
+        row = self._repair_waiting_session(row)
         return self._row_to_result(row)
 
     def cancel_qrcode_login(self, login_task_id: str) -> dict[str, Any]:
@@ -115,10 +128,6 @@ class QRCodeLoginManager:
         if row["status"] in TERMINAL_STATUSES:
             return self._row_to_result(row)
 
-        with _EVENTS_GUARD:
-            event = _CANCEL_EVENTS.get(login_task_id)
-        if event:
-            event.set()
         now = utc_now_iso()
         self.storage.upsert_login_session(
             login_session_id=login_task_id,
@@ -131,41 +140,67 @@ class QRCodeLoginManager:
             message="QR login cancelled",
             created_at=row["created_at"],
             updated_at=now,
+            pid=row.get("pid"),
+            worker_log_path=row.get("worker_log_path"),
         )
-        if event is None:
-            release_xhs_profile(self._lock_owner(login_task_id))
+        self._terminate_worker(row.get("pid"))
         return self._row_to_result(self.storage.get_login_session_row(login_task_id))
 
-    def _start_background_worker(
+    def _start_worker_process(
         self,
         login_task_id: str,
         account_name: str,
         qr_image_path: Path,
         profile_dir: Path,
+        worker_log_path: Path,
         expires_at: str,
         timeout_seconds: int,
         headless: bool,
-        cancel_event: threading.Event,
-        lock_owner: str,
-    ) -> None:
-        thread = threading.Thread(
-            target=self._run_worker,
-            args=(
-                login_task_id,
-                account_name,
-                qr_image_path,
-                profile_dir,
-                expires_at,
-                timeout_seconds,
-                headless,
-                cancel_event,
-                lock_owner,
-            ),
-            daemon=True,
+    ) -> subprocess.Popen:
+        worker_log_path.parent.mkdir(parents=True, exist_ok=True)
+        env = os.environ.copy()
+        env["MEDIACRAWLER_MCP_HOME"] = str(self.storage.config.home)
+        env["PYTHONPATH"] = os.pathsep.join(
+            part for part in (str(self.repo_root), env.get("PYTHONPATH", "")) if part
         )
-        thread.start()
+        command = [
+            sys.executable,
+            "-m",
+            "mediacrawler_mcp.qrcode_worker",
+            "--login-task-id",
+            login_task_id,
+            "--account-name",
+            account_name,
+            "--qr-image-path",
+            str(qr_image_path),
+            "--profile-dir",
+            str(profile_dir),
+            "--expires-at",
+            expires_at,
+            "--timeout-seconds",
+            str(timeout_seconds),
+            "--headless",
+            str(headless).lower(),
+            "--repo-root",
+            str(self.repo_root),
+        ]
+        log_file = worker_log_path.open("ab")
+        try:
+            process = subprocess.Popen(
+                command,
+                cwd=self.repo_root,
+                env=env,
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+                close_fds=True,
+            )
+            log_file.close()
+            return process
+        except Exception:
+            log_file.close()
+            raise
 
-    def _run_worker(
+    def run_qrcode_worker(
         self,
         login_task_id: str,
         account_name: str,
@@ -174,9 +209,22 @@ class QRCodeLoginManager:
         expires_at: str,
         timeout_seconds: int,
         headless: bool,
-        cancel_event: threading.Event,
-        lock_owner: str,
     ) -> None:
+        self.storage.initialize()
+        lock_owner = self._lock_owner(login_task_id)
+        if not acquire_xhs_profile(self.storage.config, lock_owner):
+            self._update_session(
+                login_task_id,
+                status="failed",
+                message="XHS browser profile is busy",
+                expires_at=expires_at,
+                qr_image_path=str(qr_image_path),
+                profile_dir=str(profile_dir),
+                account_name=account_name,
+                error_code=ErrorCode.RESOURCE_BUSY,
+                error_message=f"Current owner: {current_xhs_profile_owner(self.storage.config)}",
+            )
+            return
         try:
             asyncio.run(
                 self._run_qrcode_login(
@@ -187,7 +235,6 @@ class QRCodeLoginManager:
                     expires_at=expires_at,
                     timeout_seconds=timeout_seconds,
                     headless=headless,
-                    cancel_event=cancel_event,
                 )
             )
         except Exception as exc:
@@ -199,10 +246,10 @@ class QRCodeLoginManager:
                 qr_image_path=str(qr_image_path),
                 profile_dir=str(profile_dir),
                 account_name=account_name,
+                error_code=ErrorCode.INTERNAL_ERROR,
+                error_message=str(exc),
             )
         finally:
-            with _EVENTS_GUARD:
-                _CANCEL_EVENTS.pop(login_task_id, None)
             release_xhs_profile(lock_owner)
 
     async def _run_qrcode_login(
@@ -214,7 +261,6 @@ class QRCodeLoginManager:
         expires_at: str,
         timeout_seconds: int,
         headless: bool,
-        cancel_event: threading.Event,
     ) -> None:
         self.storage.initialize()
         qr_image_path.parent.mkdir(parents=True, exist_ok=True)
@@ -278,7 +324,7 @@ class QRCodeLoginManager:
 
                 deadline = time.time() + timeout_seconds
                 while time.time() < deadline:
-                    if cancel_event.is_set():
+                    if self._is_cancelled(login_task_id):
                         self._update_session(
                             login_task_id,
                             status="cancelled",
@@ -404,6 +450,10 @@ class QRCodeLoginManager:
     def _verify_cookie_remote(self, cookie_string: str) -> bool:
         return LoginManager(self.storage, repo_root=self.repo_root)._verify_xhs_cookie_remote(cookie_string)
 
+    def _is_cancelled(self, login_task_id: str) -> bool:
+        row = self.storage.get_login_session_row(login_task_id)
+        return bool(row and row.get("status") == "cancelled")
+
     def _save_success_cookie(
         self,
         login_task_id: str,
@@ -424,6 +474,45 @@ class QRCodeLoginManager:
             account_name=account_name,
         )
 
+    def _repair_waiting_session(self, row: dict[str, Any]) -> dict[str, Any]:
+        if row.get("status") != "waiting_scan":
+            return row
+        if self._worker_alive(row.get("pid")):
+            return row
+        account_name = row.get("account_name") or "default"
+        login_status = LoginManager(self.storage, repo_root=self.repo_root).get_login_status(
+            "xhs",
+            account_name=account_name,
+            verify_remote=True,
+        )
+        if login_status.get("status") == "logged_in":
+            self._update_session(
+                row["login_session_id"],
+                status="success",
+                message="XHS QR login succeeded; status repaired from verified account cookie.",
+                expires_at=row.get("expires_at"),
+                qr_image_path=row.get("qr_image_path"),
+                profile_dir=row.get("profile_dir"),
+                account_name=account_name,
+                pid=row.get("pid"),
+                worker_log_path=row.get("worker_log_path"),
+            )
+            return self.storage.get_login_session_row(row["login_session_id"]) or row
+        if login_status.get("status") == "unknown":
+            self._update_session(
+                row["login_session_id"],
+                status="waiting_scan",
+                message="Browser profile detected but not remotely verified. Keep waiting or import a fresh cookie.",
+                expires_at=row.get("expires_at"),
+                qr_image_path=row.get("qr_image_path"),
+                profile_dir=row.get("profile_dir"),
+                account_name=account_name,
+                pid=row.get("pid"),
+                worker_log_path=row.get("worker_log_path"),
+            )
+            return self.storage.get_login_session_row(row["login_session_id"]) or row
+        return row
+
     def _update_session(
         self,
         login_task_id: str,
@@ -433,6 +522,10 @@ class QRCodeLoginManager:
         qr_image_path: str | None,
         profile_dir: str | None,
         account_name: str,
+        pid: int | None = None,
+        worker_log_path: str | None = None,
+        error_code: str | None = None,
+        error_message: str | None = None,
     ) -> None:
         existing = self.storage.get_login_session_row(login_task_id)
         now = utc_now_iso()
@@ -447,7 +540,37 @@ class QRCodeLoginManager:
             message=message,
             created_at=(existing or {}).get("created_at") or now,
             updated_at=now,
+            pid=pid,
+            worker_log_path=worker_log_path,
+            error_code=error_code,
+            error_message=error_message,
         )
+
+    @staticmethod
+    def _worker_alive(pid: Any) -> bool:
+        if not pid:
+            return False
+        try:
+            os.kill(int(pid), 0)
+            return True
+        except OSError:
+            return False
+        except Exception:
+            return False
+
+    @staticmethod
+    def _terminate_worker(pid: Any) -> None:
+        if not pid:
+            return
+        try:
+            if os.name == "nt":
+                os.kill(int(pid), signal.SIGTERM)
+            else:
+                os.kill(int(pid), signal.SIGTERM)
+        except OSError:
+            return
+        except Exception:
+            return
 
     @staticmethod
     def _cookie_string(cookies: list[dict[str, Any]]) -> str:
@@ -475,6 +598,8 @@ class QRCodeLoginManager:
         qr_image_path = row["qr_image_path"]
         qr_image_exists = bool(qr_image_path and Path(qr_image_path).exists())
         qr_ready = row["status"] == "waiting_scan" and qr_image_exists
+        qr_image_size = Path(qr_image_path).stat().st_size if qr_image_exists and qr_image_path else None
+        worker_pid = row.get("pid")
         return {
             "status": row["status"],
             "login_task_id": row["login_session_id"],
@@ -483,9 +608,28 @@ class QRCodeLoginManager:
             "qr_image_path": qr_image_path,
             "qr_ready": qr_ready,
             "qr_image_exists": qr_image_exists,
+            "qr_image_mime": "image/png" if qr_image_path else None,
+            "qr_image_size_bytes": qr_image_size,
+            "suggested_message": "请在二维码过期前扫码登录小红书" if qr_ready else None,
+            "expires_in_seconds": QRCodeLoginManager._expires_in_seconds(row.get("expires_at")),
             "profile_dir": row["profile_dir"],
+            "worker_pid": worker_pid,
+            "worker_alive": QRCodeLoginManager._worker_alive(worker_pid),
+            "worker_log_path": row.get("worker_log_path"),
+            "error_code": row.get("error_code"),
+            "error_message": row.get("error_message"),
             "expires_at": row["expires_at"],
             "message": row["message"],
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
         }
+
+    @staticmethod
+    def _expires_in_seconds(expires_at: str | None) -> int | None:
+        if not expires_at:
+            return None
+        try:
+            expires = datetime.fromisoformat(expires_at)
+            return max(0, int((expires - datetime.now(timezone.utc)).total_seconds()))
+        except Exception:
+            return None

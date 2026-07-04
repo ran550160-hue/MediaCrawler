@@ -35,6 +35,13 @@ def test_storage_initialize_creates_database_and_tables(tmp_path):
     assert {"datasets", "tasks", "login_sessions", "reports", "accounts"} <= tables
     assert journal_mode.lower() == "wal"
 
+    with sqlite3.connect(tmp_path / "metadata.sqlite") as conn:
+        login_columns = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info(login_sessions)").fetchall()
+        }
+    assert {"pid", "worker_log_path", "error_code", "error_message"} <= login_columns
+
 
 def test_storage_initialize_is_idempotent(tmp_path):
     storage = Storage(_config(tmp_path))

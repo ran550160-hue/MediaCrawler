@@ -189,6 +189,7 @@ def get_login_status(
     platform: str = "xhs",
     account_name: str = "default",
     verify_remote: bool = False,
+    verify_permission: bool = False,
 ) -> dict[str, Any]:
     """Get local login status for a platform account."""
     try:
@@ -196,6 +197,7 @@ def get_login_status(
             platform=platform,
             account_name=account_name,
             verify_remote=verify_remote,
+            verify_permission=verify_permission,
         )
     except McpAppError as exc:
         return exc.to_result()

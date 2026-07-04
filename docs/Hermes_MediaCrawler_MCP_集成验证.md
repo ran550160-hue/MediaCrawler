@@ -216,20 +216,33 @@ MCP 默认 `MEDIACRAWLER_MCP_BROWSER_MODE=persistent_context`，采集命令会�
   "qr_image_path": "/data/mediacrawler-mcp/login_qrcodes/task_qrcode_login_xhs_....png",
   "qr_ready": true,
   "qr_image_exists": true,
+  "qr_image_mime": "image/png",
+  "qr_image_size_bytes": 1662,
+  "worker_pid": 12345,
+  "worker_alive": true,
+  "worker_log_path": "/data/mediacrawler-mcp/logs/task_qrcode_login_xhs_....log",
   "expires_at": "..."
 }
 ```
 
 3. 只有当 `status == "waiting_scan"` 且 `qr_ready == true` 时，Hermes 才读取 `qr_image_path` 并上传到飞书，让用户扫码。
 4. Hermes 轮询 `mcp_mediacrawler_get_qrcode_login_status(login_task_id)`。
-5. 返回 `status=success` 后，MCP 已远程验证并保存 cookie，并且 Playwright persistent profile 已落到 `browser_data/xhs_user_data_dir`。建议再调用 `mcp_mediacrawler_get_login_status(verify_remote=true)` 做最终确认。
+5. 返回 `status=success` 后，MCP 已远程验证并保存 cookie，并且 Playwright persistent profile 已落到 `browser_data/xhs_user_data_dir`。建议再调用 `mcp_mediacrawler_get_login_status(verify_remote=true, verify_permission=true)` 做最终确认。
 6. 用户取消或二维码过期时，调用 `mcp_mediacrawler_cancel_qrcode_login(login_task_id)` 或重新发起二维码登录。
+
+二维码登录 worker 是独立子进程。即使 Hermes stdio client 本次调用结束，worker 仍会继续轮询扫码状态并写入 SQLite。若 `get_qrcode_login_status` 发现 worker 已退出但账号 cookie 已远程验证通过，会把卡住的 `waiting_scan` 自动修正为 `success`。
 
 二维码登录和小红书采集共用同一把 XHS browser profile 文件锁。同一时间只允许一个 XHS collection 或 QR login，避免多个 Playwright 进程抢占 `browser_data/xhs_user_data_dir` 导致 profile lock 或 launch timeout。不要在 MCP 任务运行时手工启动另一个直接使用同一 XHS profile 的 `main.py`。
 
 更新 QR login 或 collection 相关代码后，需要在 Hermes/Gateway 侧执行 `/reload-mcp` 或重启进程，确保加载到最新 MCP server。
 
 生产环境建议 Hermes/飞书入口调用 `mcp_mediacrawler_start_collection(..., verify_login_remote=true)`，避免本地 cookie 文件存在但实际已过期时继续启动 Playwright。当前 MCP 默认值也是 `true`，只有低频调试或明确要减少远程校验请求时才建议显式传 `false`。
+
+`start_collection` 会在启动 crawler 前执行 preflight：登录远程验证、账号采集权限验证、CDP endpoint、输出路径等。失败时会返回 `PREFLIGHT_FAILED` 和 `checks` 列表，不会启动 Playwright。若账号已登录但无采集权限，预期错误码为 `XHS_PERMISSION_DENIED` 或 `permission_denied`。
+
+如果配置 `MEDIACRAWLER_MCP_BROWSER_MODE=cdp_existing`，第一版只支持 `MEDIACRAWLER_MCP_CDP_ENDPOINT=http://127.0.0.1:<port>` 这种本机 endpoint。CDP 不可连时 `start_collection` 会在 preflight 阶段返回 `CDP_UNAVAILABLE`，不会等 crawler 日志失败。
+
+`get_task_status` 只用于 collection task。若传入 `task_qrcode_login_xhs_...`，会返回 `TASK_TYPE_MISMATCH`，Hermes 应改用 `get_qrcode_login_status`。
 
 SSH/Xshell 服务器环境建议在启动 Hermes/Gateway 前执行 `unset DISPLAY`，或用 `DISPLAY=` 启动服务，避免 X11 forwarding 触发 Xmanager 弹窗影响 Playwright。
 

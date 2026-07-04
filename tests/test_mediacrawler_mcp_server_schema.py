@@ -11,6 +11,12 @@ def test_start_collection_schema_defaults_to_remote_verify():
     assert signature.parameters["verify_login_remote"].default is True
 
 
+def test_get_login_status_schema_exposes_permission_verify():
+    signature = inspect.signature(server.get_login_status)
+
+    assert signature.parameters["verify_permission"].default is False
+
+
 def test_start_qrcode_login_schema_exposes_qr_wait_seconds(monkeypatch):
     calls = {}
 

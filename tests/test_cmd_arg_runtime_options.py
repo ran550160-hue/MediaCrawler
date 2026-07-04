@@ -10,6 +10,7 @@ from cmd_arg import parse_cmd
 async def test_cmd_arg_accepts_cdp_runtime_options():
     original_enable_cdp = config.ENABLE_CDP_MODE
     original_connect_existing = config.CDP_CONNECT_EXISTING
+    original_debug_port = config.CDP_DEBUG_PORT
     try:
         await parse_cmd(
             [
@@ -19,11 +20,15 @@ async def test_cmd_arg_accepts_cdp_runtime_options():
                 "false",
                 "--cdp_connect_existing",
                 "false",
+                "--cdp_debug_port",
+                "9333",
             ]
         )
 
         assert config.ENABLE_CDP_MODE is False
         assert config.CDP_CONNECT_EXISTING is False
+        assert config.CDP_DEBUG_PORT == 9333
     finally:
         config.ENABLE_CDP_MODE = original_enable_cdp
         config.CDP_CONNECT_EXISTING = original_connect_existing
+        config.CDP_DEBUG_PORT = original_debug_port

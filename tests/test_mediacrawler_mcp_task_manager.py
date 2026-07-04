@@ -51,17 +51,22 @@ class FakeRunner(CrawlerRunner):
 
 
 class FakeLoginManager:
-    def __init__(self, status="logged_in", cookie_string=None):
+    def __init__(self, status="logged_in", cookie_string=None, can_collect=True):
         self.status = status
         self.cookie_string = cookie_string
+        self.can_collect = can_collect
         self.verify_remote_values = []
+        self.verify_permission_values = []
 
-    def get_login_status(self, platform, verify_remote=False):
+    def get_login_status(self, platform, verify_remote=False, verify_permission=False):
         self.verify_remote_values.append(verify_remote)
+        self.verify_permission_values.append(verify_permission)
         return {
             "status": self.status,
             "platform": platform,
             "remote_verified": verify_remote,
+            "permission_verified": verify_permission,
+            "can_collect": self.can_collect,
             "message": "login required" if self.status != "logged_in" else "ok",
         }
 
@@ -83,6 +88,17 @@ def _setup(tmp_path, runner, login_manager=None):
         name="小红书采集任务",
         platforms=["xhs"],
         keywords=["程序员接单", "AI编程副业"],
+    )
+    return dataset, TaskManager(storage, runner, login_manager or FakeLoginManager()), storage
+
+
+def _setup_with_config(tmp_path, runner, config, login_manager=None):
+    storage = Storage(config)
+    dataset_service = DatasetService(config, storage)
+    dataset = dataset_service.create_dataset(
+        name="cdp test",
+        platforms=["xhs"],
+        keywords=["AI"],
     )
     return dataset, TaskManager(storage, runner, login_manager or FakeLoginManager()), storage
 
@@ -134,6 +150,7 @@ def test_start_collection_runs_runner_and_archives_outputs(tmp_path):
     assert runner.started["options"].enable_cdp_mode is False
     assert runner.started["options"].cdp_connect_existing is False
     assert manager.login_manager.verify_remote_values == [True]
+    assert manager.login_manager.verify_permission_values == [True]
 
     _wait_until(lambda: manager.get_task_status(result["task_id"])["status"] == "ready")
     status = manager.get_task_status(result["task_id"])
@@ -159,6 +176,25 @@ def test_crawler_runner_build_command_disables_cdp_by_default(tmp_path):
     assert command[command.index("--cdp_connect_existing") + 1] == "false"
     assert command[command.index("--crawler_max_notes_count") + 1] == "3"
     assert command[command.index("--lt") + 1] == "cookie"
+
+
+def test_crawler_runner_build_command_passes_cdp_debug_port(tmp_path):
+    runner = CrawlerRunner(repo_root=tmp_path)
+    command = runner.build_command(
+        keywords=["AI缂栫▼鍓笟"],
+        output_dir=tmp_path / "out",
+        options=CollectionOptions(
+            max_contents=3,
+            login_type="cookie",
+            cookie_string="web_session=abc",
+            enable_cdp_mode=True,
+            cdp_connect_existing=True,
+            cdp_debug_port=9333,
+        ),
+    )
+
+    assert "--cdp_debug_port" in command
+    assert command[command.index("--cdp_debug_port") + 1] == "9333"
 
 
 def test_archive_outputs_trims_contents_and_related_comments(tmp_path):
@@ -252,7 +288,8 @@ def test_start_collection_requires_login_before_starting_runner(tmp_path):
     with pytest.raises(McpAppError) as exc_info:
         manager.start_collection(dataset.dataset_id)
 
-    assert exc_info.value.code == ErrorCode.LOGIN_REQUIRED
+    assert exc_info.value.code == ErrorCode.PREFLIGHT_FAILED
+    assert exc_info.value.payload["checks"][1]["name"] == "xhs_login"
     assert runner.started == {}
 
 
@@ -294,7 +331,7 @@ def test_start_collection_does_not_continue_with_expired_cookie_status(tmp_path)
     with pytest.raises(McpAppError) as exc_info:
         manager.start_collection(dataset.dataset_id)
 
-    assert exc_info.value.code == ErrorCode.LOGIN_REQUIRED
+    assert exc_info.value.code == ErrorCode.PREFLIGHT_FAILED
     assert runner.started == {}
 
 
@@ -321,6 +358,7 @@ def test_start_collection_verifies_login_remotely_by_default(tmp_path):
     manager.start_collection(dataset.dataset_id)
 
     assert login_manager.verify_remote_values == [True]
+    assert login_manager.verify_permission_values == [True]
 
 
 def test_start_collection_can_disable_remote_verify(tmp_path):
@@ -331,6 +369,7 @@ def test_start_collection_can_disable_remote_verify(tmp_path):
     manager.start_collection(dataset.dataset_id, verify_login_remote=False)
 
     assert login_manager.verify_remote_values == [False]
+    assert login_manager.verify_permission_values == [True]
 
 
 def test_start_collection_blocks_when_remote_verify_marks_expired(tmp_path):
@@ -341,6 +380,62 @@ def test_start_collection_blocks_when_remote_verify_marks_expired(tmp_path):
     with pytest.raises(McpAppError) as exc_info:
         manager.start_collection(dataset.dataset_id, verify_login_remote=True)
 
-    assert exc_info.value.code == ErrorCode.LOGIN_REQUIRED
+    assert exc_info.value.code == ErrorCode.PREFLIGHT_FAILED
     assert login_manager.verify_remote_values == [True]
     assert runner.started == {}
+
+
+def test_start_collection_preflight_fails_when_cdp_endpoint_unreachable(tmp_path):
+    config = McpConfig(
+        home=tmp_path,
+        browser_mode="cdp_existing",
+        cdp_endpoint="http://127.0.0.1:9",
+        max_concurrent_tasks=1,
+        default_timeout_seconds=300,
+    )
+    runner = FakeRunner(FakeProcess())
+    dataset, manager, _ = _setup_with_config(tmp_path, runner, config)
+
+    with pytest.raises(McpAppError) as exc_info:
+        manager.start_collection(dataset.dataset_id)
+
+    assert exc_info.value.code == ErrorCode.PREFLIGHT_FAILED
+    assert any(check["name"] == "cdp_endpoint" and check["status"] == "failed" for check in exc_info.value.payload["checks"])
+    assert runner.started == {}
+
+
+def test_get_task_status_guides_qr_login_task_ids(tmp_path):
+    runner = FakeRunner(FakeProcess())
+    _, manager, _ = _setup(tmp_path, runner)
+
+    with pytest.raises(McpAppError) as exc_info:
+        manager.get_task_status("task_qrcode_login_xhs_20260704_abc")
+
+    assert exc_info.value.code == ErrorCode.TASK_TYPE_MISMATCH
+    assert "get_qrcode_login_status" in exc_info.value.message
+
+
+def test_start_collection_preflight_blocks_permission_denied(tmp_path):
+    runner = FakeRunner(FakeProcess())
+    dataset, manager, _ = _setup(
+        tmp_path,
+        runner,
+        FakeLoginManager(status="permission_denied", cookie_string="web_session=abc123", can_collect=False),
+    )
+
+    with pytest.raises(McpAppError) as exc_info:
+        manager.start_collection(dataset.dataset_id)
+
+    assert exc_info.value.code == ErrorCode.PREFLIGHT_FAILED
+    assert any(check["name"] == "xhs_login" and check["status"] == "failed" for check in exc_info.value.payload["checks"])
+    assert runner.started == {}
+
+
+def test_failed_crawler_log_parser_extracts_permission_denied(tmp_path):
+    log_path = tmp_path / "crawler.log"
+    log_path.write_text("DataFetchError: 您当前登录的账号没有权限访问\n", encoding="utf-8")
+
+    code, message = TaskManager._extract_crawler_error(log_path)
+
+    assert code == ErrorCode.XHS_PERMISSION_DENIED
+    assert message == "您当前登录的账号没有权限访问"
