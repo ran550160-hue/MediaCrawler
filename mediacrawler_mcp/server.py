@@ -283,6 +283,7 @@ def start_collection(
     include_sub_comments: bool = False,
     headless: bool = True,
     verify_login_remote: bool = True,
+    skip_preflight: bool = False,
 ) -> dict[str, Any]:
     """Start an async xhs collection task for a dataset."""
     try:
@@ -294,6 +295,7 @@ def start_collection(
             include_sub_comments=include_sub_comments,
             headless=headless,
             verify_login_remote=verify_login_remote,
+            skip_preflight=skip_preflight,
         )
         return {"status": "accepted", **task}
     except McpAppError as exc:

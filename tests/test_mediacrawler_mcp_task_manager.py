@@ -385,6 +385,21 @@ def test_start_collection_blocks_when_remote_verify_marks_expired(tmp_path):
     assert runner.started == {}
 
 
+def test_start_collection_skip_preflight_runs_native_crawler_for_diagnostics(tmp_path):
+    runner = FakeRunner(FakeProcess(return_code=2))
+    login_manager = FakeLoginManager(status="permission_denied", cookie_string=None, can_collect=False)
+    dataset, manager, _ = _setup(tmp_path, runner, login_manager)
+
+    result = manager.start_collection(dataset.dataset_id, skip_preflight=True, max_contents=1, include_comments=False)
+
+    assert result["task_id"].startswith("task_collect_xhs_")
+    assert login_manager.verify_remote_values == []
+    assert login_manager.verify_permission_values == []
+    assert runner.started["options"].login_type == "qrcode"
+    assert runner.started["options"].max_contents == 1
+    assert runner.started["options"].include_comments is False
+
+
 def test_start_collection_preflight_fails_when_cdp_endpoint_unreachable(tmp_path):
     config = McpConfig(
         home=tmp_path,

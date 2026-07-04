@@ -534,4 +534,46 @@ def test_qrcode_login_observed_cookie_permission_denied_becomes_terminal(tmp_pat
     assert result["status"] == "permission_denied"
     assert result["error_code"] == ErrorCode.XHS_PERMISSION_DENIED
     assert result["last_verify_error_code"] == ErrorCode.XHS_PERMISSION_DENIED
+    assert result["verification_attempts"] == 1
     assert context.cleared is False
+
+
+def test_qrcode_login_expiry_grace_observes_delayed_cookie(tmp_path, monkeypatch):
+    storage = _storage(tmp_path)
+    manager = QRCodeLoginManager(storage, repo_root=tmp_path / "repo")
+    manager.QR_CONFIRM_GRACE_SECONDS = 0.2
+    manager.QR_POLL_INTERVAL_SECONDS = 0.01
+    manager.REMOTE_VERIFY_WINDOW_SECONDS = 0.2
+    manager.REMOTE_VERIFY_INTERVAL_SECONDS = 0.01
+    storage.initialize()
+    now = utc_now_iso()
+    storage.upsert_login_session(
+        login_session_id="login-grace",
+        platform="xhs",
+        account_name="default",
+        status="waiting_scan",
+        qr_image_path=str(storage.config.login_qrcodes_dir / "login-grace_qr_1.png"),
+        profile_dir=str(tmp_path / "repo" / "browser_data" / "xhs_user_data_dir"),
+        expires_at="2000-01-01T00:00:00+00:00",
+        message="QR ready",
+        created_at=now,
+        updated_at=now,
+    )
+    context = _FakeContext([[], [{"name": "web_session", "value": "delayed-session"}]])
+    monkeypatch.setattr(manager, "_verify_cookie_remote", lambda cookie: True)
+
+    observed = asyncio.run(
+        manager._observe_cookie_after_qr_expiry(
+            context=context,
+            login_task_id="login-grace",
+            account_name="default",
+            profile_dir=tmp_path / "repo" / "browser_data" / "xhs_user_data_dir",
+            expires_at="2000-01-01T00:00:00+00:00",
+            qr_image_path=storage.config.login_qrcodes_dir / "login-grace_qr_1.png",
+        )
+    )
+
+    result = manager.get_qrcode_login_status("login-grace")
+    assert observed is True
+    assert result["status"] == "success"
+    assert result["observed_cookie_at"] is not None

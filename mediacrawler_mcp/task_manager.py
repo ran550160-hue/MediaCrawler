@@ -39,6 +39,7 @@ class TaskManager:
         include_sub_comments: bool = False,
         headless: bool = True,
         verify_login_remote: bool = True,
+        skip_preflight: bool = False,
     ) -> dict[str, Any]:
         dataset_id = (dataset_id or "").strip()
         if not dataset_id:
@@ -60,6 +61,7 @@ class TaskManager:
             keywords=keywords,
             output_dir=output_dir,
             verify_login_remote=verify_login_remote,
+            skip_login_preflight=skip_preflight,
         )
         failed_checks = [check for check in checks if check["status"] == "failed"]
         if failed_checks:
@@ -251,6 +253,7 @@ class TaskManager:
         keywords: list[str],
         output_dir: Path,
         verify_login_remote: bool,
+        skip_login_preflight: bool = False,
     ) -> tuple[list[dict[str, str]], dict[str, Any], int | None]:
         checks: list[dict[str, str]] = []
         clean_keywords = [str(keyword).strip() for keyword in keywords if str(keyword).strip()]
@@ -259,21 +262,37 @@ class TaskManager:
         else:
             checks.append({"name": "keywords", "status": "failed", "message": "Dataset keywords are empty"})
 
-        login_status = self.login_manager.get_login_status(
-            "xhs",
-            verify_remote=verify_login_remote,
-            verify_permission=True,
-        )
-        if login_status.get("status") == "logged_in" and login_status.get("can_collect") is not False:
-            checks.append({"name": "xhs_login", "status": "passed", "message": login_status.get("message") or "Logged in"})
-        else:
+        login_status: dict[str, Any] = {
+            "status": "skipped",
+            "remote_verified": False,
+            "permission_verified": False,
+            "can_collect": None,
+            "message": "XHS login preflight skipped; native crawler will run directly for diagnostics.",
+        }
+        if skip_login_preflight:
             checks.append(
                 {
                     "name": "xhs_login",
-                    "status": "failed",
-                    "message": login_status.get("message") or "XHS login or permission verification failed",
+                    "status": "skipped",
+                    "message": "XHS login/permission preflight skipped; native crawler will diagnose actual API access.",
                 }
             )
+        else:
+            login_status = self.login_manager.get_login_status(
+                "xhs",
+                verify_remote=verify_login_remote,
+                verify_permission=True,
+            )
+            if login_status.get("status") == "logged_in" and login_status.get("can_collect") is not False:
+                checks.append({"name": "xhs_login", "status": "passed", "message": login_status.get("message") or "Logged in"})
+            else:
+                checks.append(
+                    {
+                        "name": "xhs_login",
+                        "status": "failed",
+                        "message": login_status.get("message") or "XHS login or permission verification failed",
+                    }
+                )
 
         try:
             output_dir.mkdir(parents=True, exist_ok=True)

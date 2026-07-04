@@ -34,8 +34,10 @@ TERMINAL_STATUSES = {
 
 
 class QRCodeLoginManager:
-    REMOTE_VERIFY_WINDOW_SECONDS = 30
-    REMOTE_VERIFY_INTERVAL_SECONDS = 3
+    QR_CONFIRM_GRACE_SECONDS: float = 25
+    QR_POLL_INTERVAL_SECONDS: float = 1
+    REMOTE_VERIFY_WINDOW_SECONDS: float = 30
+    REMOTE_VERIFY_INTERVAL_SECONDS: float = 3
 
     def __init__(self, storage: Storage, repo_root: Path = REPO_ROOT):
         self.storage = storage
@@ -399,7 +401,19 @@ class QRCodeLoginManager:
                             timeout_deadline=deadline,
                         )
                         return
-                    await asyncio.sleep(1)
+                    await asyncio.sleep(max(0.1, float(self.QR_POLL_INTERVAL_SECONDS)))
+
+                if timeout_seconds > 0 and self.QR_CONFIRM_GRACE_SECONDS > 0:
+                    observed = await self._observe_cookie_after_qr_expiry(
+                        context=context,
+                        login_task_id=login_task_id,
+                        account_name=account_name,
+                        profile_dir=profile_dir,
+                        expires_at=expires_at,
+                        qr_image_path=current_qr_image_path,
+                    )
+                    if observed:
+                        return
 
                 self._update_session(
                     login_task_id,
@@ -413,6 +427,65 @@ class QRCodeLoginManager:
                 self._log_worker("expired", login_task_id=login_task_id)
             finally:
                 await context.close()
+
+    async def _observe_cookie_after_qr_expiry(
+        self,
+        context: Any,
+        login_task_id: str,
+        account_name: str,
+        profile_dir: Path,
+        expires_at: str,
+        qr_image_path: Path,
+    ) -> bool:
+        """Watch briefly after QR expiry for delayed cookie writes from a confirmed phone scan."""
+        grace_seconds = max(0.0, float(self.QR_CONFIRM_GRACE_SECONDS))
+        if grace_seconds <= 0:
+            return False
+        self._update_session(
+            login_task_id,
+            status="expired_pending_cookie",
+            message="QR timer expired; waiting briefly for delayed cookie write after phone confirmation.",
+            expires_at=expires_at,
+            qr_image_path=str(qr_image_path),
+            profile_dir=str(profile_dir),
+            account_name=account_name,
+        )
+        self._log_worker("expired pending cookie grace", login_task_id=login_task_id, grace_seconds=grace_seconds)
+        deadline = time.time() + grace_seconds
+        while time.time() < deadline:
+            if self._is_cancelled(login_task_id):
+                self._update_session(
+                    login_task_id,
+                    status="cancelled",
+                    message="QR login cancelled",
+                    expires_at=expires_at,
+                    qr_image_path=str(qr_image_path),
+                    profile_dir=str(profile_dir),
+                    account_name=account_name,
+                )
+                self._log_worker("cancelled during expiry grace", login_task_id=login_task_id)
+                return True
+            cookies = await context.cookies()
+            cookie_string = self._cookie_string(cookies)
+            if LoginManager.extract_web_session(cookie_string):
+                self._log_worker(
+                    "web_session observed after expiry",
+                    login_task_id=login_task_id,
+                    cookie_names=self._cookie_names(cookies),
+                )
+                await self._verify_observed_cookie_until_terminal(
+                    context=context,
+                    login_task_id=login_task_id,
+                    account_name=account_name,
+                    profile_dir=profile_dir,
+                    expires_at=expires_at,
+                    qr_image_path=qr_image_path,
+                    timeout_deadline=time.time() + max(0.1, float(self.REMOTE_VERIFY_WINDOW_SECONDS)),
+                )
+                return True
+            await asyncio.sleep(max(0.1, float(self.QR_POLL_INTERVAL_SECONDS)))
+        self._log_worker("expiry grace ended without cookie", login_task_id=login_task_id)
+        return False
 
     async def _prepare_qr_code(self, page: Any, qr_image_path: Path, login_task_id: str, qr_index: int) -> bool:
         qr_element = await self._find_qr_element(page, timeout_ms=5000, click_login=False)
@@ -602,6 +675,16 @@ class QRCodeLoginManager:
                 attempt=attempts,
                 error_code=last_result.get("error_code"),
             )
+            if self._should_fast_fail_verify(last_result):
+                self._log_worker(
+                    "remote verify fast fail",
+                    login_task_id=login_task_id,
+                    attempt=attempts,
+                    error_code=last_result.get("error_code"),
+                    xhs_code=last_result.get("xhs_code"),
+                    message=last_result.get("message"),
+                )
+                break
             await asyncio.sleep(max(0.1, float(self.REMOTE_VERIFY_INTERVAL_SECONDS)))
 
         terminal_status, error_code = self._terminal_status_for_verify_result(last_result)
@@ -667,6 +750,12 @@ class QRCodeLoginManager:
         if error_code == ErrorCode.REMOTE_VERIFY_FAILED:
             return "remote_verify_failed", ErrorCode.REMOTE_VERIFY_FAILED
         return "cookie_observed_but_invalid", ErrorCode.COOKIE_OBSERVED_BUT_INVALID
+
+    @staticmethod
+    def _should_fast_fail_verify(result: dict[str, Any] | None) -> bool:
+        if not result:
+            return False
+        return result.get("error_code") == ErrorCode.XHS_PERMISSION_DENIED or result.get("xhs_code") == -104
 
     def _log_verify_attempt(
         self,

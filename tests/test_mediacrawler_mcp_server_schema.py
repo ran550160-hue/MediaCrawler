@@ -9,6 +9,7 @@ def test_start_collection_schema_defaults_to_remote_verify():
     signature = inspect.signature(server.start_collection)
 
     assert signature.parameters["verify_login_remote"].default is True
+    assert signature.parameters["skip_preflight"].default is False
 
 
 def test_get_login_status_schema_exposes_permission_verify():
