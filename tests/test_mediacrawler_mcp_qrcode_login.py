@@ -72,7 +72,9 @@ class _FakeContext:
         self._cookie_calls = 0
         self.page = _FakePage(selector_failures=selector_failures)
         self.cleared = False
+        self.cleared_cookie_names: list[str | None] = []
         self.closed = False
+        self.init_script_paths: list[str] = []
 
     async def new_page(self):
         return self.page
@@ -84,10 +86,23 @@ class _FakeContext:
             return list(batch)
         return list(self._cookies)
 
-    async def clear_cookies(self):
+    async def clear_cookies(self, **kwargs):
+        name = kwargs.get("name")
+        self.cleared_cookie_names.append(name)
+        if name == "web_session":
+            self._cookies = [cookie for cookie in self._cookies if cookie.get("name") != "web_session"]
+            if self._cookie_batches is not None:
+                self._cookie_batches = [
+                    [cookie for cookie in batch if cookie.get("name") != "web_session"]
+                    for batch in self._cookie_batches
+                ]
+            return
         self.cleared = True
         self._cookies = []
         self._cookie_batches = None
+
+    async def add_init_script(self, path):
+        self.init_script_paths.append(path)
 
     async def close(self):
         self.closed = True
@@ -288,7 +303,7 @@ def test_qrcode_login_accepts_initial_cookie_only_after_remote_verify(tmp_path, 
     assert storage.get_account_row("xhs:default")["status"] == "logged_in"
 
 
-def test_qrcode_login_clears_stale_initial_profile_cookie(tmp_path, monkeypatch):
+def test_qrcode_login_clears_only_stale_initial_login_cookie(tmp_path, monkeypatch):
     storage = _storage(tmp_path)
     manager = QRCodeLoginManager(storage, repo_root=tmp_path / "repo")
     context = _FakeContext([{"name": "web_session", "value": "stale-session"}])
@@ -311,9 +326,35 @@ def test_qrcode_login_clears_stale_initial_profile_cookie(tmp_path, monkeypatch)
     assert result["status"] == "expired"
     assert result["qr_ready"] is False
     assert result["qr_image_exists"] is True
-    assert context.cleared is True
-    assert context.page.evaluated is True
+    assert context.cleared is False
+    assert context.cleared_cookie_names == ["web_session"]
+    assert context.page.evaluated is False
     assert storage.get_account_row("xhs:default") is None
+
+
+def test_qrcode_login_adds_stealth_script_before_opening_page(tmp_path, monkeypatch):
+    storage = _storage(tmp_path)
+    repo_root = tmp_path / "repo"
+    stealth_path = repo_root / "libs" / "stealth.min.js"
+    stealth_path.parent.mkdir(parents=True)
+    stealth_path.write_text("// stealth", encoding="utf-8")
+    manager = QRCodeLoginManager(storage, repo_root=repo_root)
+    context = _FakeContext([])
+    monkeypatch.setattr("mediacrawler_mcp.qrcode_login.async_playwright", lambda: _FakeAsyncPlaywright(context))
+
+    asyncio.run(
+        manager._run_qrcode_login(
+            login_task_id="login-stealth",
+            account_name="default",
+            qr_image_path=storage.config.login_qrcodes_dir / "login-stealth.png",
+            profile_dir=repo_root / "browser_data" / "xhs_user_data_dir",
+            expires_at="2099-01-01T00:00:00+00:00",
+            timeout_seconds=0,
+            headless=True,
+        )
+    )
+
+    assert context.init_script_paths == [str(stealth_path)]
 
 
 def test_qrcode_login_fails_with_debug_screenshot_when_qr_not_found(tmp_path, monkeypatch):

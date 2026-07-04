@@ -297,6 +297,7 @@ class QRCodeLoginManager:
                 ),
             )
             self._log_worker("browser launched", login_task_id=login_task_id, profile_dir=str(profile_dir))
+            await self._add_stealth_script(context, login_task_id)
             page = await context.new_page()
             try:
                 await page.goto("https://www.xiaohongshu.com", wait_until="domcontentloaded")
@@ -328,16 +329,16 @@ class QRCodeLoginManager:
                         )
                         return
                     self._log_worker(
-                        "stale initial profile cookie cleared",
+                        "stale initial login cookie cleared",
                         login_task_id=login_task_id,
                         error_code=initial_verify.get("error_code"),
                         message=initial_verify.get("message"),
                     )
-                    await self._clear_stale_browser_state(context, page)
+                    await self._clear_stale_login_cookie(context, page, login_task_id)
                     self._update_session(
                         login_task_id,
                         status="initializing",
-                        message="Existing XHS profile cookie failed remote verification. Cleared stale browser state and waiting for QR code.",
+                        message="Existing XHS profile cookie failed remote verification. Cleared stale login cookie while preserving browser device state.",
                         expires_at=expires_at,
                         qr_image_path=str(qr_image_path),
                         profile_dir=str(profile_dir),
@@ -471,15 +472,42 @@ class QRCodeLoginManager:
             f"current_url={current_url}; screenshot_path={screenshot_path}"
         )
 
-    async def _clear_stale_browser_state(self, context: Any, page: Any) -> None:
+    async def _add_stealth_script(self, context: Any, login_task_id: str) -> None:
+        stealth_path = self.repo_root / "libs" / "stealth.min.js"
+        if not stealth_path.exists():
+            self._log_worker("stealth script missing", login_task_id=login_task_id, path=str(stealth_path))
+            return
         try:
-            await context.clear_cookies()
-        except Exception:
-            pass
+            await context.add_init_script(path=str(stealth_path))
+            self._log_worker("stealth script added", login_task_id=login_task_id, path=str(stealth_path))
+        except Exception as exc:
+            self._log_worker("stealth script add failed", login_task_id=login_task_id, error=str(exc))
+
+    async def _clear_stale_login_cookie(self, context: Any, page: Any, login_task_id: str) -> None:
+        """Drop only the invalid login cookie; keep XHS browser device identifiers intact."""
         try:
-            await page.evaluate("() => { localStorage.clear(); sessionStorage.clear(); }")
-        except Exception:
-            pass
+            await context.clear_cookies(name="web_session")
+            self._log_worker("web_session cookie cleared by context filter", login_task_id=login_task_id)
+            return
+        except TypeError:
+            self._log_worker("context cookie filter unsupported; falling back to page cookie expiry", login_task_id=login_task_id)
+        except Exception as exc:
+            self._log_worker("context cookie filter failed; falling back to page cookie expiry", login_task_id=login_task_id, error=str(exc))
+
+        try:
+            await page.evaluate(
+                """() => {
+                    const expires = 'Thu, 01 Jan 1970 00:00:00 GMT';
+                    const domains = [location.hostname, '.xiaohongshu.com', 'www.xiaohongshu.com'];
+                    for (const domain of domains) {
+                        document.cookie = `web_session=; expires=${expires}; path=/; domain=${domain}`;
+                    }
+                    document.cookie = `web_session=; expires=${expires}; path=/`;
+                }"""
+            )
+            self._log_worker("web_session cookie expired by page script", login_task_id=login_task_id)
+        except Exception as exc:
+            self._log_worker("web_session cookie page expiry failed", login_task_id=login_task_id, error=str(exc))
 
     async def _verify_observed_cookie_until_terminal(
         self,

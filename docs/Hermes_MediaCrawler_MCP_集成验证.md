@@ -242,6 +242,8 @@ MCP 默认 `MEDIACRAWLER_MCP_BROWSER_MODE=persistent_context`，采集命令会�
 
 `worker_log_path` 会记录 QR generated/refreshed、web_session observed、remote verify passed/failed、cookie kept for retry、terminal failure、worker exited 等事件。日志只记录 cookie 名称和校验结果，不记录完整 cookie 值。
 
+为了降低小红书反复提示“PC 新设备验证”的概率，二维码登录 worker 会复用稳定的 `browser_data/xhs_user_data_dir` profile，并在打开登录页前注入与原生 XHS crawler 一致的 `libs/stealth.min.js`。如果 profile 里已有旧 `web_session` 但远程验证失败，MCP 只尝试清理失效的 `web_session` 登录 cookie，不会清空全部 cookies、localStorage 或 sessionStorage，以保留小红书用于识别同一浏览器设备的本地状态。
+
 二维码登录 worker 是独立子进程。即使 Hermes stdio client 本次调用结束，worker 仍会继续轮询扫码状态并写入 SQLite。若 `get_qrcode_login_status` 发现 worker 已退出但账号 cookie 已远程验证通过，会把卡住的 `waiting_scan` 自动修正为 `success`。
 
 二维码登录和小红书采集共用同一把 XHS browser profile 文件锁。同一时间只允许一个 XHS collection 或 QR login，避免多个 Playwright 进程抢占 `browser_data/xhs_user_data_dir` 导致 profile lock 或 launch timeout。不要在 MCP 任务运行时手工启动另一个直接使用同一 XHS profile 的 `main.py`。
