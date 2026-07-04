@@ -64,6 +64,10 @@ SCHEMA_STATEMENTS = (
       worker_log_path TEXT,
       error_code TEXT,
       error_message TEXT,
+      verification_attempts INTEGER DEFAULT 0,
+      last_verify_error_code TEXT,
+      last_verify_message TEXT,
+      observed_cookie_at TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     )
@@ -135,6 +139,10 @@ class Storage:
                 "worker_log_path": "TEXT",
                 "error_code": "TEXT",
                 "error_message": "TEXT",
+                "verification_attempts": "INTEGER DEFAULT 0",
+                "last_verify_error_code": "TEXT",
+                "last_verify_message": "TEXT",
+                "observed_cookie_at": "TEXT",
             },
         )
 
@@ -428,6 +436,10 @@ class Storage:
         worker_log_path: str | None = None,
         error_code: str | None = None,
         error_message: str | None = None,
+        verification_attempts: int | None = None,
+        last_verify_error_code: str | None = None,
+        last_verify_message: str | None = None,
+        observed_cookie_at: str | None = None,
     ) -> None:
         with self.connect() as conn:
             conn.execute(
@@ -436,9 +448,11 @@ class Storage:
                     login_session_id, platform, account_name, status,
                     qr_image_path, profile_dir, expires_at, message,
                     pid, worker_log_path, error_code, error_message,
+                    verification_attempts, last_verify_error_code,
+                    last_verify_message, observed_cookie_at,
                     created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(login_session_id) DO UPDATE SET
                     platform=excluded.platform,
                     account_name=excluded.account_name,
@@ -451,6 +465,10 @@ class Storage:
                     worker_log_path=COALESCE(excluded.worker_log_path, login_sessions.worker_log_path),
                     error_code=excluded.error_code,
                     error_message=excluded.error_message,
+                    verification_attempts=COALESCE(excluded.verification_attempts, login_sessions.verification_attempts),
+                    last_verify_error_code=COALESCE(excluded.last_verify_error_code, login_sessions.last_verify_error_code),
+                    last_verify_message=COALESCE(excluded.last_verify_message, login_sessions.last_verify_message),
+                    observed_cookie_at=COALESCE(excluded.observed_cookie_at, login_sessions.observed_cookie_at),
                     updated_at=excluded.updated_at
                 """,
                 (
@@ -466,6 +484,10 @@ class Storage:
                     worker_log_path,
                     error_code,
                     error_message,
+                    verification_attempts,
+                    last_verify_error_code,
+                    last_verify_message,
+                    observed_cookie_at,
                     created_at,
                     updated_at,
                 ),

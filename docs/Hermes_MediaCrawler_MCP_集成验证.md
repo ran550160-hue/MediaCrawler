@@ -213,7 +213,7 @@ MCP 默认 `MEDIACRAWLER_MCP_BROWSER_MODE=persistent_context`，采集命令会�
 {
   "status": "waiting_scan",
   "login_task_id": "task_qrcode_login_xhs_...",
-  "qr_image_path": "/data/mediacrawler-mcp/login_qrcodes/task_qrcode_login_xhs_....png",
+  "qr_image_path": "/data/mediacrawler-mcp/login_qrcodes/task_qrcode_login_xhs_..._qr_1.png",
   "qr_ready": true,
   "qr_image_exists": true,
   "qr_image_mime": "image/png",
@@ -221,6 +221,10 @@ MCP 默认 `MEDIACRAWLER_MCP_BROWSER_MODE=persistent_context`，采集命令会�
   "worker_pid": 12345,
   "worker_alive": true,
   "worker_log_path": "/data/mediacrawler-mcp/logs/task_qrcode_login_xhs_....log",
+  "verification_attempts": 0,
+  "last_verify_error_code": null,
+  "last_verify_message": null,
+  "observed_cookie_at": null,
   "expires_at": "..."
 }
 ```
@@ -229,6 +233,14 @@ MCP 默认 `MEDIACRAWLER_MCP_BROWSER_MODE=persistent_context`，采集命令会�
 4. Hermes 轮询 `mcp_mediacrawler_get_qrcode_login_status(login_task_id)`。
 5. 返回 `status=success` 后，MCP 已远程验证并保存 cookie，并且 Playwright persistent profile 已落到 `browser_data/xhs_user_data_dir`。建议再调用 `mcp_mediacrawler_get_login_status(verify_remote=true, verify_permission=true)` 做最终确认。
 6. 用户取消或二维码过期时，调用 `mcp_mediacrawler_cancel_qrcode_login(login_task_id)` 或重新发起二维码登录。
+
+扫码后如果 MCP 已经观察到 `web_session`，状态会先进入 `cookie_observed`，并在默认 30 秒窗口内每 3 秒做一次远程校验。Hermes 此时应提示“已扫码，正在验证登录态”，不要继续催促用户扫码。`verification_attempts`、`last_verify_error_code`、`last_verify_message`、`observed_cookie_at` 可用于展示验证进度和失败原因。
+
+`permission_denied`、`remote_verify_failed`、`cookie_observed_but_invalid` 都是二维码登录终态：前者通常表示账号没有小红书 Web 采集权限；后两者通常表示 cookie 已产生但 selfinfo 远程验证始终失败。Hermes 应提示用户重新登录、换账号或重新发起二维码登录，而不是继续等待原二维码。
+
+二维码图片路径不会复用。首次二维码为 `<login_task_id>_qr_1.png`，后续如果需要刷新会生成 `<login_task_id>_qr_2.png`、`<login_task_id>_qr_3.png`。Hermes 已经发到飞书的旧图片不会被覆盖，轮询状态时应始终以最新返回的 `qr_image_path` 为准。
+
+`worker_log_path` 会记录 QR generated/refreshed、web_session observed、remote verify passed/failed、cookie kept for retry、terminal failure、worker exited 等事件。日志只记录 cookie 名称和校验结果，不记录完整 cookie 值。
 
 二维码登录 worker 是独立子进程。即使 Hermes stdio client 本次调用结束，worker 仍会继续轮询扫码状态并写入 SQLite。若 `get_qrcode_login_status` 发现 worker 已退出但账号 cookie 已远程验证通过，会把卡住的 `waiting_scan` 自动修正为 `success`。
 

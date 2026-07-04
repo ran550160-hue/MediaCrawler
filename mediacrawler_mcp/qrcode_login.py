@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import signal
 import subprocess
@@ -21,10 +22,21 @@ from mediacrawler_mcp.storage import Storage
 from mediacrawler_mcp.utils import make_task_id, utc_now_iso
 
 
-TERMINAL_STATUSES = {"success", "failed", "cancelled", "expired"}
+TERMINAL_STATUSES = {
+    "success",
+    "failed",
+    "cancelled",
+    "expired",
+    "permission_denied",
+    "remote_verify_failed",
+    "cookie_observed_but_invalid",
+}
 
 
 class QRCodeLoginManager:
+    REMOTE_VERIFY_WINDOW_SECONDS = 30
+    REMOTE_VERIFY_INTERVAL_SECONDS = 3
+
     def __init__(self, storage: Storage, repo_root: Path = REPO_ROOT):
         self.storage = storage
         self.repo_root = Path(repo_root)
@@ -53,7 +65,7 @@ class QRCodeLoginManager:
             )
         release_xhs_profile(lock_owner)
 
-        qr_image_path = self.storage.config.login_qrcodes_dir / f"{login_task_id}.png"
+        qr_image_path = self._qr_image_path(login_task_id, 1)
         profile_dir = self.repo_root / "browser_data" / "xhs_user_data_dir"
         worker_log_path = self.storage.config.logs_dir / f"{login_task_id}.log"
         expires_at = (
@@ -211,8 +223,14 @@ class QRCodeLoginManager:
         headless: bool,
     ) -> None:
         self.storage.initialize()
+        self._log_worker("worker started", login_task_id=login_task_id, account_name=account_name)
         lock_owner = self._lock_owner(login_task_id)
         if not acquire_xhs_profile(self.storage.config, lock_owner):
+            self._log_worker(
+                "worker failed to acquire profile lock",
+                login_task_id=login_task_id,
+                owner=current_xhs_profile_owner(self.storage.config),
+            )
             self._update_session(
                 login_task_id,
                 status="failed",
@@ -238,6 +256,7 @@ class QRCodeLoginManager:
                 )
             )
         except Exception as exc:
+            self._log_worker("worker exception", login_task_id=login_task_id, error=str(exc))
             self._update_session(
                 login_task_id,
                 status="failed",
@@ -251,6 +270,7 @@ class QRCodeLoginManager:
             )
         finally:
             release_xhs_profile(lock_owner)
+            self._log_worker("worker exited", login_task_id=login_task_id)
 
     async def _run_qrcode_login(
         self,
@@ -265,6 +285,7 @@ class QRCodeLoginManager:
         self.storage.initialize()
         qr_image_path.parent.mkdir(parents=True, exist_ok=True)
         profile_dir.mkdir(parents=True, exist_ok=True)
+        current_qr_image_path = qr_image_path
         async with async_playwright() as playwright:
             context = await playwright.chromium.launch_persistent_context(
                 user_data_dir=str(profile_dir),
@@ -275,12 +296,28 @@ class QRCodeLoginManager:
                     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36"
                 ),
             )
+            self._log_worker("browser launched", login_task_id=login_task_id, profile_dir=str(profile_dir))
             page = await context.new_page()
             try:
                 await page.goto("https://www.xiaohongshu.com", wait_until="domcontentloaded")
-                initial_cookie = self._cookie_string(await context.cookies())
+                self._log_worker("page opened", login_task_id=login_task_id, url=self._safe_page_url(page))
+                initial_cookies = await context.cookies()
+                initial_cookie = self._cookie_string(initial_cookies)
                 if LoginManager.extract_web_session(initial_cookie):
-                    if self._verify_cookie_remote(initial_cookie):
+                    self._log_worker(
+                        "web_session observed",
+                        login_task_id=login_task_id,
+                        source="initial_profile",
+                        cookie_names=self._cookie_names(initial_cookies),
+                    )
+                    initial_verify = self._normalize_verify_result(self._verify_cookie_remote(initial_cookie))
+                    self._log_verify_attempt(
+                        login_task_id,
+                        attempt=1,
+                        result=initial_verify,
+                        source="initial_profile",
+                    )
+                    if initial_verify.get("ok"):
                         self._save_success_cookie(
                             login_task_id,
                             account_name,
@@ -290,6 +327,12 @@ class QRCodeLoginManager:
                             qr_image_path,
                         )
                         return
+                    self._log_worker(
+                        "stale initial profile cookie cleared",
+                        login_task_id=login_task_id,
+                        error_code=initial_verify.get("error_code"),
+                        message=initial_verify.get("message"),
+                    )
                     await self._clear_stale_browser_state(context, page)
                     self._update_session(
                         login_task_id,
@@ -301,13 +344,14 @@ class QRCodeLoginManager:
                         account_name=account_name,
                     )
 
-                if not await self._prepare_qr_code(page, qr_image_path, login_task_id):
+                current_qr_image_path = self._qr_image_path(login_task_id, 1)
+                if not await self._prepare_qr_code(page, current_qr_image_path, login_task_id, qr_index=1):
                     self._update_session(
                         login_task_id,
                         status="failed",
                         message=await self._qr_failure_message(page, login_task_id),
                         expires_at=expires_at,
-                        qr_image_path=str(qr_image_path),
+                        qr_image_path=str(current_qr_image_path),
                         profile_dir=str(profile_dir),
                         account_name=account_name,
                     )
@@ -317,7 +361,7 @@ class QRCodeLoginManager:
                     status="waiting_scan",
                     message="QR code is ready. Send qr_image_path to the user.",
                     expires_at=expires_at,
-                    qr_image_path=str(qr_image_path),
+                    qr_image_path=str(current_qr_image_path),
                     profile_dir=str(profile_dir),
                     account_name=account_name,
                 )
@@ -330,44 +374,30 @@ class QRCodeLoginManager:
                             status="cancelled",
                             message="QR login cancelled",
                             expires_at=expires_at,
-                            qr_image_path=str(qr_image_path),
+                            qr_image_path=str(current_qr_image_path),
                             profile_dir=str(profile_dir),
                             account_name=account_name,
+                        )
+                        self._log_worker("cancelled", login_task_id=login_task_id)
+                        return
+                    cookies = await context.cookies()
+                    cookie_string = self._cookie_string(cookies)
+                    if LoginManager.extract_web_session(cookie_string):
+                        self._log_worker(
+                            "web_session observed",
+                            login_task_id=login_task_id,
+                            cookie_names=self._cookie_names(cookies),
+                        )
+                        await self._verify_observed_cookie_until_terminal(
+                            context=context,
+                            login_task_id=login_task_id,
+                            account_name=account_name,
+                            profile_dir=profile_dir,
+                            expires_at=expires_at,
+                            qr_image_path=current_qr_image_path,
+                            timeout_deadline=deadline,
                         )
                         return
-                    cookie_string = self._cookie_string(await context.cookies())
-                    if LoginManager.extract_web_session(cookie_string):
-                        if self._verify_cookie_remote(cookie_string):
-                            self._save_success_cookie(
-                                login_task_id,
-                                account_name,
-                                cookie_string,
-                                profile_dir,
-                                expires_at,
-                                qr_image_path,
-                            )
-                            return
-                        await self._clear_stale_browser_state(context, page)
-                        if not await self._prepare_qr_code(page, qr_image_path, login_task_id):
-                            self._update_session(
-                                login_task_id,
-                                status="failed",
-                                message=await self._qr_failure_message(page, login_task_id),
-                                expires_at=expires_at,
-                                qr_image_path=str(qr_image_path),
-                                profile_dir=str(profile_dir),
-                                account_name=account_name,
-                            )
-                            return
-                        self._update_session(
-                            login_task_id,
-                            status="waiting_scan",
-                            message="Observed XHS cookie failed remote verification. Refreshed QR code and waiting for a valid login.",
-                            expires_at=expires_at,
-                            qr_image_path=str(qr_image_path),
-                            profile_dir=str(profile_dir),
-                            account_name=account_name,
-                        )
                     await asyncio.sleep(1)
 
                 self._update_session(
@@ -375,27 +405,31 @@ class QRCodeLoginManager:
                     status="expired",
                     message="QR login expired",
                     expires_at=expires_at,
-                    qr_image_path=str(qr_image_path),
+                    qr_image_path=str(current_qr_image_path),
                     profile_dir=str(profile_dir),
                     account_name=account_name,
                 )
+                self._log_worker("expired", login_task_id=login_task_id)
             finally:
                 await context.close()
 
-    async def _prepare_qr_code(self, page: Any, qr_image_path: Path, login_task_id: str) -> bool:
+    async def _prepare_qr_code(self, page: Any, qr_image_path: Path, login_task_id: str, qr_index: int) -> bool:
         qr_element = await self._find_qr_element(page, timeout_ms=5000, click_login=False)
         if qr_element is not None:
             await qr_element.screenshot(path=str(qr_image_path))
+            self._log_qr_image("QR generated" if qr_index == 1 else "QR refreshed", login_task_id, qr_image_path, qr_index)
             return True
 
         try:
             await page.reload(wait_until="domcontentloaded")
+            self._log_worker("page reloaded while preparing QR", login_task_id=login_task_id, url=self._safe_page_url(page))
         except Exception:
             pass
 
         qr_element = await self._find_qr_element(page, timeout_ms=5000, click_login=True)
         if qr_element is not None:
             await qr_element.screenshot(path=str(qr_image_path))
+            self._log_qr_image("QR generated" if qr_index == 1 else "QR refreshed", login_task_id, qr_image_path, qr_index)
             return True
 
         await self._save_failure_screenshot(page, login_task_id)
@@ -447,8 +481,203 @@ class QRCodeLoginManager:
         except Exception:
             pass
 
-    def _verify_cookie_remote(self, cookie_string: str) -> bool:
-        return LoginManager(self.storage, repo_root=self.repo_root)._verify_xhs_cookie_remote(cookie_string)
+    async def _verify_observed_cookie_until_terminal(
+        self,
+        context: Any,
+        login_task_id: str,
+        account_name: str,
+        profile_dir: Path,
+        expires_at: str,
+        qr_image_path: Path,
+        timeout_deadline: float,
+    ) -> None:
+        observed_at = utc_now_iso()
+        self._update_session(
+            login_task_id,
+            status="cookie_observed",
+            message="Detected XHS login cookie after QR scan. Remote verification is in progress.",
+            expires_at=expires_at,
+            qr_image_path=str(qr_image_path),
+            profile_dir=str(profile_dir),
+            account_name=account_name,
+            verification_attempts=0,
+            observed_cookie_at=observed_at,
+        )
+        verify_deadline = min(
+            timeout_deadline,
+            time.time() + max(0.1, float(self.REMOTE_VERIFY_WINDOW_SECONDS)),
+        )
+        attempts = 0
+        last_result: dict[str, Any] | None = None
+        while time.time() < verify_deadline:
+            if self._is_cancelled(login_task_id):
+                self._update_session(
+                    login_task_id,
+                    status="cancelled",
+                    message="QR login cancelled",
+                    expires_at=expires_at,
+                    qr_image_path=str(qr_image_path),
+                    profile_dir=str(profile_dir),
+                    account_name=account_name,
+                    verification_attempts=attempts,
+                    observed_cookie_at=observed_at,
+                )
+                self._log_worker("cancelled during remote verify", login_task_id=login_task_id)
+                return
+
+            cookies = await context.cookies()
+            cookie_string = self._cookie_string(cookies)
+            attempts += 1
+            if not LoginManager.extract_web_session(cookie_string):
+                last_result = {
+                    "ok": False,
+                    "status": "cookie_observed_but_invalid",
+                    "error_code": ErrorCode.COOKIE_OBSERVED_BUT_INVALID,
+                    "message": "web_session cookie disappeared before remote verification succeeded.",
+                    "http_status": None,
+                    "xhs_code": None,
+                    "xhs_msg": None,
+                }
+            else:
+                last_result = self._normalize_verify_result(self._verify_cookie_remote(cookie_string))
+            self._log_verify_attempt(login_task_id, attempts, last_result, source="qr_scan")
+
+            if last_result.get("ok"):
+                self._save_success_cookie(
+                    login_task_id,
+                    account_name,
+                    cookie_string,
+                    profile_dir,
+                    expires_at,
+                    qr_image_path,
+                    verification_attempts=attempts,
+                    observed_cookie_at=observed_at,
+                )
+                return
+
+            self._update_session(
+                login_task_id,
+                status="cookie_observed",
+                message="Detected XHS login cookie after QR scan. Remote verification is still retrying.",
+                expires_at=expires_at,
+                qr_image_path=str(qr_image_path),
+                profile_dir=str(profile_dir),
+                account_name=account_name,
+                verification_attempts=attempts,
+                last_verify_error_code=last_result.get("error_code"),
+                last_verify_message=last_result.get("message"),
+                observed_cookie_at=observed_at,
+            )
+            self._log_worker(
+                "cookie kept for retry",
+                login_task_id=login_task_id,
+                attempt=attempts,
+                error_code=last_result.get("error_code"),
+            )
+            await asyncio.sleep(max(0.1, float(self.REMOTE_VERIFY_INTERVAL_SECONDS)))
+
+        terminal_status, error_code = self._terminal_status_for_verify_result(last_result)
+        message = (last_result or {}).get("message") or "Observed XHS cookie did not pass remote verification."
+        self._update_session(
+            login_task_id,
+            status=terminal_status,
+            message=message,
+            expires_at=expires_at,
+            qr_image_path=str(qr_image_path),
+            profile_dir=str(profile_dir),
+            account_name=account_name,
+            error_code=error_code,
+            error_message=message,
+            verification_attempts=attempts,
+            last_verify_error_code=(last_result or {}).get("error_code"),
+            last_verify_message=message,
+            observed_cookie_at=observed_at,
+        )
+        self._log_worker(
+            "terminal failure",
+            login_task_id=login_task_id,
+            status=terminal_status,
+            attempts=attempts,
+            error_code=error_code,
+            message=message,
+        )
+
+    def _verify_cookie_remote(self, cookie_string: str) -> dict[str, Any]:
+        return LoginManager(self.storage, repo_root=self.repo_root)._verify_xhs_cookie_remote_detail(cookie_string)
+
+    @staticmethod
+    def _normalize_verify_result(result: Any) -> dict[str, Any]:
+        if isinstance(result, dict):
+            return result
+        if result is True:
+            return {
+                "ok": True,
+                "status": "logged_in",
+                "error_code": None,
+                "message": "XHS cookie remote verification succeeded.",
+                "http_status": None,
+                "xhs_code": None,
+                "xhs_msg": None,
+            }
+        return {
+            "ok": False,
+            "status": "remote_verify_failed",
+            "error_code": ErrorCode.REMOTE_VERIFY_FAILED,
+            "message": "XHS cookie remote verification failed.",
+            "http_status": None,
+            "xhs_code": None,
+            "xhs_msg": None,
+        }
+
+    @staticmethod
+    def _terminal_status_for_verify_result(result: dict[str, Any] | None) -> tuple[str, str]:
+        if not result:
+            return "cookie_observed_but_invalid", ErrorCode.COOKIE_OBSERVED_BUT_INVALID
+        error_code = result.get("error_code") or ErrorCode.COOKIE_OBSERVED_BUT_INVALID
+        if error_code == ErrorCode.XHS_PERMISSION_DENIED or result.get("status") == "permission_denied":
+            return "permission_denied", ErrorCode.XHS_PERMISSION_DENIED
+        if error_code == ErrorCode.REMOTE_VERIFY_FAILED:
+            return "remote_verify_failed", ErrorCode.REMOTE_VERIFY_FAILED
+        return "cookie_observed_but_invalid", ErrorCode.COOKIE_OBSERVED_BUT_INVALID
+
+    def _log_verify_attempt(
+        self,
+        login_task_id: str,
+        attempt: int,
+        result: dict[str, Any],
+        source: str,
+    ) -> None:
+        event = "remote verify passed" if result.get("ok") else "remote verify failed"
+        self._log_worker(
+            event,
+            login_task_id=login_task_id,
+            attempt=attempt,
+            source=source,
+            status=result.get("status"),
+            error_code=result.get("error_code"),
+            http_status=result.get("http_status"),
+            xhs_code=result.get("xhs_code"),
+            xhs_msg=result.get("xhs_msg"),
+            message=result.get("message"),
+        )
+
+    def _log_qr_image(self, event: str, login_task_id: str, qr_image_path: Path, qr_index: int) -> None:
+        try:
+            size = qr_image_path.stat().st_size
+        except OSError:
+            size = None
+        self._log_worker(
+            event,
+            login_task_id=login_task_id,
+            qr_index=qr_index,
+            qr_image_path=str(qr_image_path),
+            qr_image_size_bytes=size,
+        )
+
+    @staticmethod
+    def _log_worker(event: str, **fields: Any) -> None:
+        safe_fields = {key: value for key, value in fields.items() if value is not None}
+        print(f"{utc_now_iso()} {event} {json.dumps(safe_fields, ensure_ascii=False)}", flush=True)
 
     def _is_cancelled(self, login_task_id: str) -> bool:
         row = self.storage.get_login_session_row(login_task_id)
@@ -462,6 +691,8 @@ class QRCodeLoginManager:
         profile_dir: Path,
         expires_at: str,
         qr_image_path: Path,
+        verification_attempts: int | None = None,
+        observed_cookie_at: str | None = None,
     ) -> None:
         LoginManager(self.storage, repo_root=self.repo_root).import_cookies("xhs", cookie_string, account_name)
         self._update_session(
@@ -472,6 +703,15 @@ class QRCodeLoginManager:
             qr_image_path=str(qr_image_path),
             profile_dir=str(profile_dir),
             account_name=account_name,
+            verification_attempts=verification_attempts,
+            last_verify_error_code="",
+            last_verify_message="",
+            observed_cookie_at=observed_cookie_at,
+        )
+        self._log_worker(
+            "remote verify passed; cookie saved",
+            login_task_id=login_task_id,
+            verification_attempts=verification_attempts,
         )
 
     def _repair_waiting_session(self, row: dict[str, Any]) -> dict[str, Any]:
@@ -526,6 +766,10 @@ class QRCodeLoginManager:
         worker_log_path: str | None = None,
         error_code: str | None = None,
         error_message: str | None = None,
+        verification_attempts: int | None = None,
+        last_verify_error_code: str | None = None,
+        last_verify_message: str | None = None,
+        observed_cookie_at: str | None = None,
     ) -> None:
         existing = self.storage.get_login_session_row(login_task_id)
         now = utc_now_iso()
@@ -544,6 +788,10 @@ class QRCodeLoginManager:
             worker_log_path=worker_log_path,
             error_code=error_code,
             error_message=error_message,
+            verification_attempts=verification_attempts,
+            last_verify_error_code=last_verify_error_code,
+            last_verify_message=last_verify_message,
+            observed_cookie_at=observed_cookie_at,
         )
 
     @staticmethod
@@ -575,6 +823,20 @@ class QRCodeLoginManager:
     @staticmethod
     def _cookie_string(cookies: list[dict[str, Any]]) -> str:
         return ";".join(f"{cookie.get('name')}={cookie.get('value')}" for cookie in cookies if cookie.get("name"))
+
+    @staticmethod
+    def _cookie_names(cookies: list[dict[str, Any]]) -> list[str]:
+        return sorted(str(cookie.get("name")) for cookie in cookies if cookie.get("name"))
+
+    def _qr_image_path(self, login_task_id: str, qr_index: int) -> Path:
+        return self.storage.config.login_qrcodes_dir / f"{login_task_id}_qr_{qr_index}.png"
+
+    @staticmethod
+    def _safe_page_url(page: Any) -> str:
+        try:
+            return str(page.url)
+        except Exception:
+            return "unknown"
 
     @staticmethod
     def _lock_owner(login_task_id: str) -> str:
@@ -616,6 +878,10 @@ class QRCodeLoginManager:
             "worker_pid": worker_pid,
             "worker_alive": QRCodeLoginManager._worker_alive(worker_pid),
             "worker_log_path": row.get("worker_log_path"),
+            "verification_attempts": row.get("verification_attempts") or 0,
+            "last_verify_error_code": row.get("last_verify_error_code") or None,
+            "last_verify_message": row.get("last_verify_message") or None,
+            "observed_cookie_at": row.get("observed_cookie_at"),
             "error_code": row.get("error_code"),
             "error_message": row.get("error_message"),
             "expires_at": row["expires_at"],

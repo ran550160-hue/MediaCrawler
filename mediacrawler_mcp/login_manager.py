@@ -307,6 +307,9 @@ class LoginManager:
         )
 
     def _verify_xhs_cookie_remote(self, cookie_string: str) -> bool:
+        return bool(self._verify_xhs_cookie_remote_detail(cookie_string).get("ok"))
+
+    def _verify_xhs_cookie_remote_detail(self, cookie_string: str) -> dict[str, Any]:
         uri = "/api/sns/web/v1/user/selfinfo"
         host = "https://edith.xiaohongshu.com"
         try:
@@ -333,11 +336,58 @@ class LoginManager:
             }
             response = httpx.get(f"{host}{uri}", headers=headers, timeout=15, trust_env=False)
             if response.status_code != 200:
-                return False
+                return {
+                    "ok": False,
+                    "status": "remote_verify_failed",
+                    "error_code": ErrorCode.REMOTE_VERIFY_FAILED,
+                    "message": f"XHS selfinfo returned HTTP {response.status_code}",
+                    "http_status": response.status_code,
+                    "xhs_code": None,
+                    "xhs_msg": None,
+                }
             payload = response.json()
-            return payload.get("success") is True
-        except Exception:
-            return False
+            xhs_code = payload.get("code")
+            xhs_msg = payload.get("msg")
+            if payload.get("success") is True:
+                return {
+                    "ok": True,
+                    "status": "logged_in",
+                    "error_code": None,
+                    "message": "XHS cookie remote verification succeeded.",
+                    "http_status": response.status_code,
+                    "xhs_code": xhs_code,
+                    "xhs_msg": xhs_msg,
+                }
+            message = xhs_msg or response.text
+            if self._is_permission_denied_message(message):
+                return {
+                    "ok": False,
+                    "status": "permission_denied",
+                    "error_code": ErrorCode.XHS_PERMISSION_DENIED,
+                    "message": message,
+                    "http_status": response.status_code,
+                    "xhs_code": xhs_code,
+                    "xhs_msg": xhs_msg,
+                }
+            return {
+                "ok": False,
+                "status": "remote_verify_failed",
+                "error_code": ErrorCode.REMOTE_VERIFY_FAILED,
+                "message": message,
+                "http_status": response.status_code,
+                "xhs_code": xhs_code,
+                "xhs_msg": xhs_msg,
+            }
+        except Exception as exc:
+            return {
+                "ok": False,
+                "status": "remote_verify_failed",
+                "error_code": ErrorCode.REMOTE_VERIFY_FAILED,
+                "message": str(exc),
+                "http_status": None,
+                "xhs_code": None,
+                "xhs_msg": None,
+            }
 
     def _verify_xhs_collect_permission(self, cookie_string: str) -> dict[str, Any]:
         uri = "/api/sns/web/v1/search/notes"
@@ -392,7 +442,7 @@ class LoginManager:
             if payload.get("success") is True:
                 return {"status": "success", "can_collect": True, "error_code": None, "message": None}
             message = payload.get("msg") or response.text
-            if "权限" in message or "permission" in message.lower():
+            if self._is_permission_denied_message(message):
                 return {
                     "status": "failed",
                     "can_collect": False,
@@ -412,3 +462,8 @@ class LoginManager:
             if key.strip() == "web_session" and value.strip():
                 return value.strip()
         return None
+
+    @staticmethod
+    def _is_permission_denied_message(message: str | None) -> bool:
+        text = (message or "").lower()
+        return "权限" in text or "鏉冮檺" in text or "permission" in text

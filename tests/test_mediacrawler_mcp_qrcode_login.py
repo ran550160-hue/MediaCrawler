@@ -68,6 +68,8 @@ class _FakePage:
 class _FakeContext:
     def __init__(self, cookies, selector_failures: int = 0):
         self._cookies = cookies
+        self._cookie_batches = cookies if cookies and isinstance(cookies[0], list) else None
+        self._cookie_calls = 0
         self.page = _FakePage(selector_failures=selector_failures)
         self.cleared = False
         self.closed = False
@@ -76,11 +78,16 @@ class _FakeContext:
         return self.page
 
     async def cookies(self):
+        if self._cookie_batches is not None:
+            batch = self._cookie_batches[min(self._cookie_calls, len(self._cookie_batches) - 1)]
+            self._cookie_calls += 1
+            return list(batch)
         return list(self._cookies)
 
     async def clear_cookies(self):
         self.cleared = True
         self._cookies = []
+        self._cookie_batches = None
 
     async def close(self):
         self.closed = True
@@ -152,6 +159,7 @@ def test_start_qrcode_login_returns_qr_path_and_status(tmp_path, monkeypatch):
     try:
         assert result["status"] == "waiting_scan"
         assert result["login_task_id"].startswith("task_qrcode_login_xhs_")
+        assert result["qr_image_path"].endswith("_qr_1.png")
         assert Path(result["qr_image_path"]).exists()
         assert result["qr_ready"] is True
         assert result["qr_image_exists"] is True
@@ -335,3 +343,154 @@ def test_qrcode_login_fails_with_debug_screenshot_when_qr_not_found(tmp_path, mo
     assert error_path.exists()
     assert str(error_path) in result["message"]
     assert "current_url=https://www.xiaohongshu.com" in result["message"]
+
+
+def test_qrcode_login_retries_observed_cookie_then_succeeds_without_clearing(tmp_path, monkeypatch, capsys):
+    storage = _storage(tmp_path)
+    manager = QRCodeLoginManager(storage, repo_root=tmp_path / "repo")
+    manager.REMOTE_VERIFY_WINDOW_SECONDS = 1
+    manager.REMOTE_VERIFY_INTERVAL_SECONDS = 0.01
+    context = _FakeContext(
+        [
+            [],
+            [{"name": "web_session", "value": "fresh-session"}],
+            [{"name": "web_session", "value": "fresh-session"}],
+            [{"name": "web_session", "value": "fresh-session"}],
+        ]
+    )
+    monkeypatch.setattr("mediacrawler_mcp.qrcode_login.async_playwright", lambda: _FakeAsyncPlaywright(context))
+    results = [
+        {
+            "ok": False,
+            "status": "remote_verify_failed",
+            "error_code": ErrorCode.REMOTE_VERIFY_FAILED,
+            "message": "not stable yet",
+            "http_status": 200,
+            "xhs_code": -1,
+            "xhs_msg": "not stable yet",
+        },
+        {
+            "ok": True,
+            "status": "logged_in",
+            "error_code": None,
+            "message": "ok",
+            "http_status": 200,
+            "xhs_code": 0,
+            "xhs_msg": "success",
+        },
+    ]
+    monkeypatch.setattr(manager, "_verify_cookie_remote", lambda cookie: results.pop(0))
+
+    asyncio.run(
+        manager._run_qrcode_login(
+            login_task_id="login-observed-success",
+            account_name="default",
+            qr_image_path=storage.config.login_qrcodes_dir / "login-observed-success_qr_1.png",
+            profile_dir=tmp_path / "repo" / "browser_data" / "xhs_user_data_dir",
+            expires_at="2099-01-01T00:00:00+00:00",
+            timeout_seconds=2,
+            headless=True,
+        )
+    )
+
+    result = manager.get_qrcode_login_status("login-observed-success")
+    captured = capsys.readouterr().out
+    assert result["status"] == "success"
+    assert result["verification_attempts"] == 2
+    assert result["last_verify_error_code"] is None
+    assert result["last_verify_message"] is None
+    assert result["observed_cookie_at"] is not None
+    assert context.cleared is False
+    assert result["qr_image_path"].endswith("_qr_1.png")
+    assert "web_session observed" in captured
+    assert "remote verify failed" in captured
+    assert "remote verify passed" in captured
+    assert "fresh-session" not in captured
+
+
+def test_qrcode_login_observed_cookie_failure_becomes_terminal(tmp_path, monkeypatch):
+    storage = _storage(tmp_path)
+    manager = QRCodeLoginManager(storage, repo_root=tmp_path / "repo")
+    manager.REMOTE_VERIFY_WINDOW_SECONDS = 0.05
+    manager.REMOTE_VERIFY_INTERVAL_SECONDS = 0.01
+    context = _FakeContext(
+        [
+            [],
+            [{"name": "web_session", "value": "bad-session"}],
+            [{"name": "web_session", "value": "bad-session"}],
+        ]
+    )
+    monkeypatch.setattr("mediacrawler_mcp.qrcode_login.async_playwright", lambda: _FakeAsyncPlaywright(context))
+    monkeypatch.setattr(
+        manager,
+        "_verify_cookie_remote",
+        lambda cookie: {
+            "ok": False,
+            "status": "remote_verify_failed",
+            "error_code": ErrorCode.REMOTE_VERIFY_FAILED,
+            "message": "selfinfo failed",
+            "http_status": 200,
+            "xhs_code": -1,
+            "xhs_msg": "selfinfo failed",
+        },
+    )
+
+    asyncio.run(
+        manager._run_qrcode_login(
+            login_task_id="login-observed-failed",
+            account_name="default",
+            qr_image_path=storage.config.login_qrcodes_dir / "login-observed-failed_qr_1.png",
+            profile_dir=tmp_path / "repo" / "browser_data" / "xhs_user_data_dir",
+            expires_at="2099-01-01T00:00:00+00:00",
+            timeout_seconds=2,
+            headless=True,
+        )
+    )
+
+    result = manager.get_qrcode_login_status("login-observed-failed")
+    assert result["status"] == "remote_verify_failed"
+    assert result["error_code"] == ErrorCode.REMOTE_VERIFY_FAILED
+    assert result["last_verify_error_code"] == ErrorCode.REMOTE_VERIFY_FAILED
+    assert result["verification_attempts"] >= 1
+    assert context.cleared is False
+    assert storage.get_account_row("xhs:default") is None
+
+
+def test_qrcode_login_observed_cookie_permission_denied_becomes_terminal(tmp_path, monkeypatch):
+    storage = _storage(tmp_path)
+    manager = QRCodeLoginManager(storage, repo_root=tmp_path / "repo")
+    manager.REMOTE_VERIFY_WINDOW_SECONDS = 0.05
+    manager.REMOTE_VERIFY_INTERVAL_SECONDS = 0.01
+    context = _FakeContext([[], [{"name": "web_session", "value": "denied-session"}]])
+    monkeypatch.setattr("mediacrawler_mcp.qrcode_login.async_playwright", lambda: _FakeAsyncPlaywright(context))
+    monkeypatch.setattr(
+        manager,
+        "_verify_cookie_remote",
+        lambda cookie: {
+            "ok": False,
+            "status": "permission_denied",
+            "error_code": ErrorCode.XHS_PERMISSION_DENIED,
+            "message": "您当前登录的账号没有权限访问",
+            "http_status": 200,
+            "xhs_code": -1,
+            "xhs_msg": "您当前登录的账号没有权限访问",
+        },
+    )
+
+    asyncio.run(
+        manager._run_qrcode_login(
+            login_task_id="login-permission-denied",
+            account_name="default",
+            qr_image_path=storage.config.login_qrcodes_dir / "login-permission-denied_qr_1.png",
+            profile_dir=tmp_path / "repo" / "browser_data" / "xhs_user_data_dir",
+            expires_at="2099-01-01T00:00:00+00:00",
+            timeout_seconds=2,
+            headless=True,
+        )
+    )
+
+    result = manager.get_qrcode_login_status("login-permission-denied")
+    assert result["status"] == "permission_denied"
+    assert result["error_code"] == ErrorCode.XHS_PERMISSION_DENIED
+    assert result["last_verify_error_code"] == ErrorCode.XHS_PERMISSION_DENIED
+    assert context.cleared is False

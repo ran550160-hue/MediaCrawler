@@ -170,8 +170,36 @@ def test_remote_cookie_verify_uses_trust_env_false_and_top_level_success(tmp_pat
     monkeypatch.setattr("mediacrawler_mcp.login_manager.httpx.get", fake_get)
 
     assert manager._verify_xhs_cookie_remote("web_session=session-value") is True
+    detail = manager._verify_xhs_cookie_remote_detail("web_session=session-value")
+    assert detail["ok"] is True
+    assert detail["status"] == "logged_in"
     assert calls["trust_env"] is False
     assert calls["url"].endswith("/api/sns/web/v1/user/selfinfo")
+
+
+def test_remote_cookie_verify_detail_maps_permission_denied(tmp_path, monkeypatch):
+    storage = _storage(tmp_path)
+    manager = LoginManager(storage, repo_root=tmp_path / "repo")
+
+    class FakeResponse:
+        status_code = 200
+        text = "permission denied"
+
+        def json(self):
+            return {"success": False, "code": -1, "msg": "您当前登录的账号没有权限访问"}
+
+    monkeypatch.setattr(
+        "media_platform.xhs.playwright_sign.sign_with_xhshow",
+        lambda **kwargs: {"x-s": "xs", "x-t": "xt", "x-s-common": "common", "x-b3-traceid": "trace"},
+    )
+    monkeypatch.setattr("mediacrawler_mcp.login_manager.httpx.get", lambda *args, **kwargs: FakeResponse())
+
+    detail = manager._verify_xhs_cookie_remote_detail("web_session=session-value")
+
+    assert detail["ok"] is False
+    assert detail["status"] == "permission_denied"
+    assert detail["error_code"] == ErrorCode.XHS_PERMISSION_DENIED
+    assert detail["xhs_msg"] == "您当前登录的账号没有权限访问"
 
 
 def test_import_cookies_rejects_missing_web_session(tmp_path):
