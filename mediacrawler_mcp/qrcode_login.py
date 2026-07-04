@@ -32,6 +32,77 @@ TERMINAL_STATUSES = {
     "cookie_observed_but_invalid",
 }
 
+XHS_DESKTOP_MAC_USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36"
+)
+
+XHS_DESKTOP_MAC_FINGERPRINT_SCRIPT = """
+(() => {
+  const defineGetter = (target, name, getter) => {
+    try {
+      Object.defineProperty(target, name, {
+        get: getter,
+        configurable: true,
+      });
+    } catch (_) {}
+  };
+
+  defineGetter(Navigator.prototype, 'platform', () => 'MacIntel');
+  defineGetter(Navigator.prototype, 'languages', () => ['zh-CN', 'zh', 'en']);
+  defineGetter(Navigator.prototype, 'webdriver', () => undefined);
+
+  if (navigator.userAgentData) {
+    const brands = [
+      { brand: 'Google Chrome', version: '137' },
+      { brand: 'Chromium', version: '137' },
+      { brand: 'Not.A/Brand', version: '99' },
+    ];
+    const fullVersionList = [
+      { brand: 'Google Chrome', version: '137.0.0.0' },
+      { brand: 'Chromium', version: '137.0.0.0' },
+      { brand: 'Not.A/Brand', version: '99.0.0.0' },
+    ];
+    const highEntropyValues = {
+      architecture: 'x86',
+      bitness: '64',
+      brands,
+      fullVersionList,
+      mobile: false,
+      model: '',
+      platform: 'macOS',
+      platformVersion: '14.0.0',
+      uaFullVersion: '137.0.0.0',
+      wow64: false,
+    };
+    const userAgentData = {
+      brands,
+      mobile: false,
+      platform: 'macOS',
+      getHighEntropyValues: async (hints = []) => {
+        const values = {
+          brands,
+          mobile: false,
+          platform: 'macOS',
+        };
+        for (const hint of hints) {
+          if (Object.prototype.hasOwnProperty.call(highEntropyValues, hint)) {
+            values[hint] = highEntropyValues[hint];
+          }
+        }
+        return values;
+      },
+      toJSON: () => ({
+        brands,
+        mobile: false,
+        platform: 'macOS',
+      }),
+    };
+    defineGetter(Navigator.prototype, 'userAgentData', () => userAgentData);
+  }
+})();
+"""
+
 
 class QRCodeLoginManager:
     QR_CONFIRM_GRACE_SECONDS: float = 25
@@ -307,13 +378,11 @@ class QRCodeLoginManager:
                 user_data_dir=str(profile_dir),
                 headless=headless,
                 viewport={"width": 1920, "height": 1080},
-                user_agent=(
-                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36"
-                ),
+                user_agent=XHS_DESKTOP_MAC_USER_AGENT,
             )
             self._log_worker("browser launched", login_task_id=login_task_id, profile_dir=str(profile_dir))
             await self._add_stealth_script(context, login_task_id)
+            await self._add_xhs_desktop_mac_fingerprint(context, login_task_id)
             page = await context.new_page()
             try:
                 await page.goto("https://www.xiaohongshu.com", wait_until="domcontentloaded")
@@ -569,6 +638,19 @@ class QRCodeLoginManager:
             self._log_worker("stealth script added", login_task_id=login_task_id, path=str(stealth_path))
         except Exception as exc:
             self._log_worker("stealth script add failed", login_task_id=login_task_id, error=str(exc))
+
+    async def _add_xhs_desktop_mac_fingerprint(self, context: Any, login_task_id: str) -> None:
+        try:
+            await context.add_init_script(script=XHS_DESKTOP_MAC_FINGERPRINT_SCRIPT)
+            self._log_worker(
+                "desktop mac fingerprint script added",
+                login_task_id=login_task_id,
+                platform="MacIntel",
+                languages="zh-CN,zh,en",
+                ua_platform="macOS",
+            )
+        except Exception as exc:
+            self._log_worker("desktop mac fingerprint script add failed", login_task_id=login_task_id, error=str(exc))
 
     async def _clear_stale_login_cookie(self, context: Any, page: Any, login_task_id: str) -> None:
         """Drop only the invalid login cookie; keep XHS browser device identifiers intact."""

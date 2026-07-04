@@ -134,3 +134,21 @@ async def test_xhs_search_raises_when_all_detail_tasks_fail(monkeypatch):
 
     with pytest.raises(DataFetchError):
         await crawler.search()
+
+
+@pytest.mark.asyncio
+async def test_xhs_client_headers_use_mac_user_agent_and_platform(monkeypatch):
+    crawler = XiaoHongShuCrawler()
+    crawler.browser_context = object()
+    crawler.context_page = object()
+
+    async def fake_convert_browser_context_cookies(browser_context, urls=None):
+        return "web_session=fake", {"web_session": "fake"}
+
+    monkeypatch.setattr(xhs_core.utils, "convert_browser_context_cookies", fake_convert_browser_context_cookies)
+
+    client = await crawler.create_xhs_client(httpx_proxy=None)
+
+    assert client.headers["user-agent"] == crawler.user_agent
+    assert "Macintosh; Intel Mac OS X" in client.headers["user-agent"]
+    assert client.headers["sec-ch-ua-platform"] == '"macOS"'

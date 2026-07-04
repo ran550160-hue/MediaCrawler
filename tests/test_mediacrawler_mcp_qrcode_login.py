@@ -75,8 +75,11 @@ class _FakeContext:
         self.cleared_cookie_names: list[str | None] = []
         self.closed = False
         self.init_script_paths: list[str] = []
+        self.init_scripts: list[str] = []
+        self.events: list[str] = []
 
     async def new_page(self):
+        self.events.append("new_page")
         return self.page
 
     async def cookies(self):
@@ -101,8 +104,12 @@ class _FakeContext:
         self._cookies = []
         self._cookie_batches = None
 
-    async def add_init_script(self, path):
-        self.init_script_paths.append(path)
+    async def add_init_script(self, script=None, *, path=None):
+        self.events.append("add_init_script")
+        if path is not None:
+            self.init_script_paths.append(str(path))
+        if script is not None:
+            self.init_scripts.append(script)
 
     async def close(self):
         self.closed = True
@@ -332,7 +339,7 @@ def test_qrcode_login_clears_only_stale_initial_login_cookie(tmp_path, monkeypat
     assert storage.get_account_row("xhs:default") is None
 
 
-def test_qrcode_login_adds_stealth_script_before_opening_page(tmp_path, monkeypatch):
+def test_qrcode_login_adds_stealth_and_mac_fingerprint_scripts_before_opening_page(tmp_path, monkeypatch):
     storage = _storage(tmp_path)
     repo_root = tmp_path / "repo"
     stealth_path = repo_root / "libs" / "stealth.min.js"
@@ -355,6 +362,14 @@ def test_qrcode_login_adds_stealth_script_before_opening_page(tmp_path, monkeypa
     )
 
     assert context.init_script_paths == [str(stealth_path)]
+    assert len(context.init_scripts) == 1
+    fingerprint_script = context.init_scripts[0]
+    assert "MacIntel" in fingerprint_script
+    assert "'zh-CN', 'zh', 'en'" in fingerprint_script
+    assert "platform: 'macOS'" in fingerprint_script
+    assert "userAgentData" in fingerprint_script
+    assert "webdriver" in fingerprint_script
+    assert context.events[:3] == ["add_init_script", "add_init_script", "new_page"]
 
 
 def test_qrcode_login_fails_with_debug_screenshot_when_qr_not_found(tmp_path, monkeypatch):
