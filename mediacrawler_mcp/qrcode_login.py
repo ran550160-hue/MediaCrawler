@@ -38,6 +38,20 @@ class QRCodeLoginManager:
     QR_POLL_INTERVAL_SECONDS: float = 1
     REMOTE_VERIFY_WINDOW_SECONDS: float = 30
     REMOTE_VERIFY_INTERVAL_SECONDS: float = 3
+    XHS_COOKIE_SETTLE_SECONDS: float = 5
+    XHS_COOKIE_SETTLE_SAMPLE_SECONDS: float = 0.5
+    XHS_REQUIRED_SETTLED_COOKIE_NAMES = frozenset({"web_session", "id_token"})
+    XHS_EXPECTED_SETTLED_COOKIE_NAMES = frozenset(
+        {
+            "web_session",
+            "id_token",
+            "x-rednote-datactry",
+            "x-rednote-holderctry",
+            "acw_tc",
+            "websectiga",
+            "sec_poison_id",
+        }
+    )
 
     def __init__(self, storage: Storage, repo_root: Path = REPO_ROOT):
         self.storage = storage
@@ -608,8 +622,10 @@ class QRCodeLoginManager:
             timeout_deadline,
             time.time() + max(0.1, float(self.REMOTE_VERIFY_WINDOW_SECONDS)),
         )
+        observed_monotonic = time.time()
         attempts = 0
         last_result: dict[str, Any] | None = None
+        last_cookie_metadata: dict[str, Any] | None = None
         while time.time() < verify_deadline:
             if self._is_cancelled(login_task_id):
                 self._update_session(
@@ -626,7 +642,13 @@ class QRCodeLoginManager:
                 self._log_worker("cancelled during remote verify", login_task_id=login_task_id)
                 return
 
-            cookies = await context.cookies()
+            cookies = await self._settled_verification_cookies(
+                context=context,
+                login_task_id=login_task_id,
+                observed_monotonic=observed_monotonic,
+                verify_deadline=verify_deadline,
+            )
+            last_cookie_metadata = self._safe_cookie_metadata(cookies)
             cookie_string = self._cookie_string(cookies)
             attempts += 1
             if not LoginManager.extract_web_session(cookie_string):
@@ -641,7 +663,13 @@ class QRCodeLoginManager:
                 }
             else:
                 last_result = self._normalize_verify_result(self._verify_cookie_remote(cookie_string))
-            self._log_verify_attempt(login_task_id, attempts, last_result, source="qr_scan")
+            self._log_verify_attempt(
+                login_task_id,
+                attempts,
+                last_result,
+                source="qr_scan",
+                cookie_metadata=last_cookie_metadata,
+            )
 
             if last_result.get("ok"):
                 self._save_success_cookie(
@@ -675,7 +703,7 @@ class QRCodeLoginManager:
                 attempt=attempts,
                 error_code=last_result.get("error_code"),
             )
-            if self._should_fast_fail_verify(last_result):
+            if self._should_fast_fail_verify(last_result, last_cookie_metadata):
                 self._log_worker(
                     "remote verify fast fail",
                     login_task_id=login_task_id,
@@ -683,6 +711,7 @@ class QRCodeLoginManager:
                     error_code=last_result.get("error_code"),
                     xhs_code=last_result.get("xhs_code"),
                     message=last_result.get("message"),
+                    missing_expected_cookie_names=(last_cookie_metadata or {}).get("missing_expected_cookie_names"),
                 )
                 break
             await asyncio.sleep(max(0.1, float(self.REMOTE_VERIFY_INTERVAL_SECONDS)))
@@ -711,7 +740,71 @@ class QRCodeLoginManager:
             attempts=attempts,
             error_code=error_code,
             message=message,
+            missing_expected_cookie_names=(last_cookie_metadata or {}).get("missing_expected_cookie_names"),
         )
+
+    async def _settled_verification_cookies(
+        self,
+        context: Any,
+        login_task_id: str,
+        observed_monotonic: float,
+        verify_deadline: float,
+    ) -> list[dict[str, Any]]:
+        """Let browser-written login cookies settle before making signed API verification calls."""
+        settle_until = min(
+            verify_deadline,
+            observed_monotonic + max(0.0, float(self.XHS_COOKIE_SETTLE_SECONDS)),
+        )
+        sample_interval = max(0.05, float(self.XHS_COOKIE_SETTLE_SAMPLE_SECONDS))
+        last_cookies: list[dict[str, Any]] = []
+        last_names: tuple[str, ...] | None = None
+        stable_samples = 0
+        logged_wait = False
+
+        while True:
+            cookies = await context.cookies()
+            last_cookies = list(cookies)
+            metadata = self._safe_cookie_metadata(last_cookies)
+            names = tuple(metadata["cookie_names"])
+            if names == last_names:
+                stable_samples += 1
+            else:
+                stable_samples = 1
+                last_names = names
+
+            missing_required = [
+                name
+                for name in sorted(self.XHS_REQUIRED_SETTLED_COOKIE_NAMES)
+                if name in metadata["missing_expected_cookie_names"]
+            ]
+            missing_expected = metadata["missing_expected_cookie_names"]
+            should_wait = (
+                time.time() < settle_until
+                and (missing_required or missing_expected or stable_samples < 2)
+            )
+            if not should_wait:
+                self._log_worker(
+                    "cookie snapshot ready for remote verify",
+                    login_task_id=login_task_id,
+                    cookie_count=metadata["cookie_count"],
+                    cookie_names=metadata["cookie_names"],
+                    duplicate_cookie_names=metadata["duplicate_cookie_names"],
+                    missing_expected_cookie_names=metadata["missing_expected_cookie_names"],
+                    stable_samples=stable_samples,
+                )
+                return last_cookies
+
+            if not logged_wait:
+                self._log_worker(
+                    "waiting for settled cookie snapshot",
+                    login_task_id=login_task_id,
+                    cookie_count=metadata["cookie_count"],
+                    cookie_names=metadata["cookie_names"],
+                    duplicate_cookie_names=metadata["duplicate_cookie_names"],
+                    missing_expected_cookie_names=metadata["missing_expected_cookie_names"],
+                )
+                logged_wait = True
+            await asyncio.sleep(min(sample_interval, max(0.05, settle_until - time.time())))
 
     def _verify_cookie_remote(self, cookie_string: str) -> dict[str, Any]:
         return LoginManager(self.storage, repo_root=self.repo_root)._verify_xhs_cookie_remote_detail(cookie_string)
@@ -752,10 +845,22 @@ class QRCodeLoginManager:
         return "cookie_observed_but_invalid", ErrorCode.COOKIE_OBSERVED_BUT_INVALID
 
     @staticmethod
-    def _should_fast_fail_verify(result: dict[str, Any] | None) -> bool:
+    def _should_fast_fail_verify(
+        result: dict[str, Any] | None,
+        cookie_metadata: dict[str, Any] | None = None,
+    ) -> bool:
         if not result:
             return False
-        return result.get("error_code") == ErrorCode.XHS_PERMISSION_DENIED or result.get("xhs_code") == -104
+        is_permission_denied = (
+            result.get("error_code") == ErrorCode.XHS_PERMISSION_DENIED
+            or result.get("xhs_code") == -104
+        )
+        if not is_permission_denied:
+            return False
+        missing = set((cookie_metadata or {}).get("missing_expected_cookie_names") or [])
+        if missing.intersection(QRCodeLoginManager.XHS_REQUIRED_SETTLED_COOKIE_NAMES):
+            return False
+        return True
 
     def _log_verify_attempt(
         self,
@@ -763,8 +868,10 @@ class QRCodeLoginManager:
         attempt: int,
         result: dict[str, Any],
         source: str,
+        cookie_metadata: dict[str, Any] | None = None,
     ) -> None:
         event = "remote verify passed" if result.get("ok") else "remote verify failed"
+        metadata = cookie_metadata or {}
         self._log_worker(
             event,
             login_task_id=login_task_id,
@@ -776,6 +883,10 @@ class QRCodeLoginManager:
             xhs_code=result.get("xhs_code"),
             xhs_msg=result.get("xhs_msg"),
             message=result.get("message"),
+            cookie_count=metadata.get("cookie_count"),
+            cookie_names=metadata.get("cookie_names"),
+            duplicate_cookie_names=metadata.get("duplicate_cookie_names"),
+            missing_expected_cookie_names=metadata.get("missing_expected_cookie_names"),
         )
 
     def _log_qr_image(self, event: str, login_task_id: str, qr_image_path: Path, qr_index: int) -> None:
@@ -944,6 +1055,19 @@ class QRCodeLoginManager:
     @staticmethod
     def _cookie_names(cookies: list[dict[str, Any]]) -> list[str]:
         return sorted(str(cookie.get("name")) for cookie in cookies if cookie.get("name"))
+
+    @classmethod
+    def _safe_cookie_metadata(cls, cookies: list[dict[str, Any]]) -> dict[str, Any]:
+        names = [str(cookie.get("name")) for cookie in cookies if cookie.get("name")]
+        unique_names = sorted(set(names))
+        duplicate_names = sorted({name for name in names if names.count(name) > 1})
+        missing_expected = sorted(cls.XHS_EXPECTED_SETTLED_COOKIE_NAMES.difference(unique_names))
+        return {
+            "cookie_count": len(names),
+            "cookie_names": unique_names,
+            "duplicate_cookie_names": duplicate_names,
+            "missing_expected_cookie_names": missing_expected,
+        }
 
     def _qr_image_path(self, login_task_id: str, qr_index: int) -> Path:
         return self.storage.config.login_qrcodes_dir / f"{login_task_id}_qr_{qr_index}.png"

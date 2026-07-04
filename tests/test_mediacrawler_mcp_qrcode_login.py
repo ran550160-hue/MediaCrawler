@@ -391,12 +391,14 @@ def test_qrcode_login_retries_observed_cookie_then_succeeds_without_clearing(tmp
     manager = QRCodeLoginManager(storage, repo_root=tmp_path / "repo")
     manager.REMOTE_VERIFY_WINDOW_SECONDS = 1
     manager.REMOTE_VERIFY_INTERVAL_SECONDS = 0.01
+    manager.XHS_COOKIE_SETTLE_SECONDS = 0.01
+    manager.XHS_COOKIE_SETTLE_SAMPLE_SECONDS = 0.01
     context = _FakeContext(
         [
             [],
-            [{"name": "web_session", "value": "fresh-session"}],
-            [{"name": "web_session", "value": "fresh-session"}],
-            [{"name": "web_session", "value": "fresh-session"}],
+            [{"name": "web_session", "value": "fresh-session"}, {"name": "id_token", "value": "token"}],
+            [{"name": "web_session", "value": "fresh-session"}, {"name": "id_token", "value": "token"}],
+            [{"name": "web_session", "value": "fresh-session"}, {"name": "id_token", "value": "token"}],
         ]
     )
     monkeypatch.setattr("mediacrawler_mcp.qrcode_login.async_playwright", lambda: _FakeAsyncPlaywright(context))
@@ -447,6 +449,7 @@ def test_qrcode_login_retries_observed_cookie_then_succeeds_without_clearing(tmp
     assert "remote verify failed" in captured
     assert "remote verify passed" in captured
     assert "fresh-session" not in captured
+    assert "id_token=token" not in captured
 
 
 def test_qrcode_login_observed_cookie_failure_becomes_terminal(tmp_path, monkeypatch):
@@ -454,6 +457,8 @@ def test_qrcode_login_observed_cookie_failure_becomes_terminal(tmp_path, monkeyp
     manager = QRCodeLoginManager(storage, repo_root=tmp_path / "repo")
     manager.REMOTE_VERIFY_WINDOW_SECONDS = 0.05
     manager.REMOTE_VERIFY_INTERVAL_SECONDS = 0.01
+    manager.XHS_COOKIE_SETTLE_SECONDS = 0.01
+    manager.XHS_COOKIE_SETTLE_SAMPLE_SECONDS = 0.01
     context = _FakeContext(
         [
             [],
@@ -502,7 +507,14 @@ def test_qrcode_login_observed_cookie_permission_denied_becomes_terminal(tmp_pat
     manager = QRCodeLoginManager(storage, repo_root=tmp_path / "repo")
     manager.REMOTE_VERIFY_WINDOW_SECONDS = 0.05
     manager.REMOTE_VERIFY_INTERVAL_SECONDS = 0.01
-    context = _FakeContext([[], [{"name": "web_session", "value": "denied-session"}]])
+    manager.XHS_COOKIE_SETTLE_SECONDS = 0.01
+    manager.XHS_COOKIE_SETTLE_SAMPLE_SECONDS = 0.01
+    context = _FakeContext(
+        [
+            [],
+            [{"name": "web_session", "value": "denied-session"}, {"name": "id_token", "value": "token"}],
+        ]
+    )
     monkeypatch.setattr("mediacrawler_mcp.qrcode_login.async_playwright", lambda: _FakeAsyncPlaywright(context))
     monkeypatch.setattr(
         manager,
@@ -538,6 +550,103 @@ def test_qrcode_login_observed_cookie_permission_denied_becomes_terminal(tmp_pat
     assert context.cleared is False
 
 
+def test_qrcode_login_permission_denied_with_incomplete_cookie_retries(tmp_path, monkeypatch):
+    storage = _storage(tmp_path)
+    manager = QRCodeLoginManager(storage, repo_root=tmp_path / "repo")
+    manager.REMOTE_VERIFY_WINDOW_SECONDS = 0.25
+    manager.REMOTE_VERIFY_INTERVAL_SECONDS = 0.01
+    manager.XHS_COOKIE_SETTLE_SECONDS = 0.01
+    manager.XHS_COOKIE_SETTLE_SAMPLE_SECONDS = 0.01
+    context = _FakeContext([[], [{"name": "web_session", "value": "denied-session"}]])
+    monkeypatch.setattr("mediacrawler_mcp.qrcode_login.async_playwright", lambda: _FakeAsyncPlaywright(context))
+    monkeypatch.setattr(
+        manager,
+        "_verify_cookie_remote",
+        lambda cookie: {
+            "ok": False,
+            "status": "permission_denied",
+            "error_code": ErrorCode.XHS_PERMISSION_DENIED,
+            "message": "您当前登录的账号没有权限访问",
+            "http_status": 200,
+            "xhs_code": -104,
+            "xhs_msg": "您当前登录的账号没有权限访问",
+        },
+    )
+
+    asyncio.run(
+        manager._run_qrcode_login(
+            login_task_id="login-permission-incomplete",
+            account_name="default",
+            qr_image_path=storage.config.login_qrcodes_dir / "login-permission-incomplete_qr_1.png",
+            profile_dir=tmp_path / "repo" / "browser_data" / "xhs_user_data_dir",
+            expires_at="2099-01-01T00:00:00+00:00",
+            timeout_seconds=2,
+            headless=True,
+        )
+    )
+
+    result = manager.get_qrcode_login_status("login-permission-incomplete")
+    assert result["status"] == "permission_denied"
+    assert result["error_code"] == ErrorCode.XHS_PERMISSION_DENIED
+    assert result["verification_attempts"] > 1
+    assert context.cleared is False
+
+
+def test_qrcode_login_waits_for_settled_cookie_names_before_remote_verify(tmp_path, monkeypatch, capsys):
+    storage = _storage(tmp_path)
+    manager = QRCodeLoginManager(storage, repo_root=tmp_path / "repo")
+    manager.REMOTE_VERIFY_WINDOW_SECONDS = 0.5
+    manager.REMOTE_VERIFY_INTERVAL_SECONDS = 0.01
+    manager.XHS_COOKIE_SETTLE_SECONDS = 0.2
+    manager.XHS_COOKIE_SETTLE_SAMPLE_SECONDS = 0.01
+    context = _FakeContext(
+        [
+            [],
+            [{"name": "web_session", "value": "fresh-session"}],
+            [{"name": "web_session", "value": "fresh-session"}],
+            [{"name": "web_session", "value": "fresh-session"}, {"name": "id_token", "value": "token"}],
+            [{"name": "web_session", "value": "fresh-session"}, {"name": "id_token", "value": "token"}],
+        ]
+    )
+    monkeypatch.setattr("mediacrawler_mcp.qrcode_login.async_playwright", lambda: _FakeAsyncPlaywright(context))
+    verified_cookies: list[str] = []
+
+    def fake_verify(cookie: str):
+        verified_cookies.append(cookie)
+        return {
+            "ok": True,
+            "status": "logged_in",
+            "error_code": None,
+            "message": "ok",
+            "http_status": 200,
+            "xhs_code": 0,
+            "xhs_msg": "success",
+        }
+
+    monkeypatch.setattr(manager, "_verify_cookie_remote", fake_verify)
+
+    asyncio.run(
+        manager._run_qrcode_login(
+            login_task_id="login-settled-cookie",
+            account_name="default",
+            qr_image_path=storage.config.login_qrcodes_dir / "login-settled-cookie_qr_1.png",
+            profile_dir=tmp_path / "repo" / "browser_data" / "xhs_user_data_dir",
+            expires_at="2099-01-01T00:00:00+00:00",
+            timeout_seconds=2,
+            headless=True,
+        )
+    )
+
+    result = manager.get_qrcode_login_status("login-settled-cookie")
+    captured = capsys.readouterr().out
+    assert result["status"] == "success"
+    assert len(verified_cookies) == 1
+    assert "id_token=token" in verified_cookies[0]
+    assert "waiting for settled cookie snapshot" in captured
+    assert "fresh-session" not in captured
+    assert "id_token=token" not in captured
+
+
 def test_qrcode_login_expiry_grace_observes_delayed_cookie(tmp_path, monkeypatch):
     storage = _storage(tmp_path)
     manager = QRCodeLoginManager(storage, repo_root=tmp_path / "repo")
@@ -545,6 +654,8 @@ def test_qrcode_login_expiry_grace_observes_delayed_cookie(tmp_path, monkeypatch
     manager.QR_POLL_INTERVAL_SECONDS = 0.01
     manager.REMOTE_VERIFY_WINDOW_SECONDS = 0.2
     manager.REMOTE_VERIFY_INTERVAL_SECONDS = 0.01
+    manager.XHS_COOKIE_SETTLE_SECONDS = 0.01
+    manager.XHS_COOKIE_SETTLE_SAMPLE_SECONDS = 0.01
     storage.initialize()
     now = utc_now_iso()
     storage.upsert_login_session(
