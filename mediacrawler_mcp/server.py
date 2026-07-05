@@ -17,13 +17,10 @@ from mediacrawler_mcp.config import load_config
 from mediacrawler_mcp.dataset_importer import DatasetImporter
 from mediacrawler_mcp.dataset_service import DatasetService
 from mediacrawler_mcp.errors import ErrorCode, McpAppError, error_result, success_result
-from mediacrawler_mcp.login_manager import LoginManager
 from mediacrawler_mcp.normalizer import DatasetNormalizer
-from mediacrawler_mcp.qrcode_login import QRCodeLoginManager
 from mediacrawler_mcp.query_engine import QueryEngine
 from mediacrawler_mcp.report_service import ReportService
 from mediacrawler_mcp.storage import Storage
-from mediacrawler_mcp.task_manager import TaskManager
 from mediacrawler_mcp.utils import setup_file_logging
 
 
@@ -424,6 +421,9 @@ def _register_experimental_collection_tools() -> None:
     config = load_config()
     if not config.enable_experimental_collection:
         return
+    from mediacrawler_mcp.login_manager import LoginManager  # noqa: PLC0415
+    from mediacrawler_mcp.qrcode_login import QRCodeLoginManager  # noqa: PLC0415
+    from mediacrawler_mcp.task_manager import TaskManager  # noqa: PLC0415
     for tool in EXPERIMENTAL_COLLECTION_TOOLS:
         mcp.tool()(tool)
 
