@@ -1,8 +1,60 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
+import importlib
 
 from mediacrawler_mcp import server
+
+
+EXPERIMENTAL_TOOL_NAMES = {
+    "get_login_status",
+    "import_cookies",
+    "start_qrcode_login",
+    "get_qrcode_login_status",
+    "cancel_qrcode_login",
+    "start_collection",
+    "get_task_status",
+    "cancel_task",
+}
+
+
+def _tool_names(server_module=server) -> set[str]:
+    return {tool.name for tool in asyncio.run(server_module.mcp.list_tools())}
+
+
+def test_default_dataset_profile_hides_experimental_collection_tools(monkeypatch):
+    monkeypatch.setenv("MEDIACRAWLER_MCP_TOOL_PROFILE", "dataset")
+    monkeypatch.delenv("MEDIACRAWLER_MCP_ENABLE_EXPERIMENTAL_COLLECTION", raising=False)
+    server_module = importlib.reload(server)
+
+    names = _tool_names(server_module)
+
+    assert {
+        "create_dataset",
+        "register_dataset",
+        "validate_dataset_bundle",
+        "import_raw_files",
+        "sync_dataset_manifest",
+        "list_datasets",
+        "get_dataset",
+        "normalize_dataset",
+        "query_dataset",
+        "generate_report",
+        "get_report",
+    }.issubset(names)
+    assert EXPERIMENTAL_TOOL_NAMES.isdisjoint(names)
+
+
+def test_experimental_collection_tools_require_explicit_enable(monkeypatch):
+    monkeypatch.setenv("MEDIACRAWLER_MCP_TOOL_PROFILE", "dataset")
+    monkeypatch.setenv("MEDIACRAWLER_MCP_ENABLE_EXPERIMENTAL_COLLECTION", "true")
+    server_module = importlib.reload(server)
+
+    assert EXPERIMENTAL_TOOL_NAMES.issubset(_tool_names(server_module))
+
+    monkeypatch.setenv("MEDIACRAWLER_MCP_ENABLE_EXPERIMENTAL_COLLECTION", "false")
+    importlib.reload(server)
 
 
 def test_start_collection_schema_defaults_to_remote_verify():

@@ -1,8 +1,14 @@
 # MediaCrawler使用方法
 
+> Hermes 部署测试请先看 [Hermes MediaCrawler MCP 部署测试指南](Hermes_MediaCrawler_MCP_部署测试指南.md)。默认主链路是 Windows 桌面真实浏览器采集后导出 dataset bundle，Hermes MCP 只负责数据集登记、标准化、查询和报告生成。
+
 ## 项目文档
 
 - [项目架构文档](项目架构文档.md) - 系统架构、模块设计、数据流向（含 Mermaid 图表）
+- [桌面采集与数据集 MCP 架构改造方案](桌面采集与数据集MCP架构改造方案.md) - 2026-07 架构调整：桌面真实浏览器采集，MCP 负责数据集查询、分析和报告
+- [技术选型与架构决策](技术选型与架构决策.md) - MediaCrawler Research MCP 技术选型与已采纳/暂缓清单
+- [MediaCrawler MCP 工程设计文档](MediaCrawler_MCP_工程设计文档.md) - MCP 工程模块、接口和数据目录设计
+- [数据采集分析 MCP 产品需求文档](数据采集分析MCP_PRD.md) - Agent 数据集分析产品范围和验收标准
 
 ## 推荐：使用 uv 管理依赖
 

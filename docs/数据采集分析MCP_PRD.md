@@ -18,6 +18,8 @@ MediaCrawler Research MCP 是一个面向 AI Agent 的垂直社媒数据采集�
 
 技术选型和架构决策详见 [技术选型与架构决策](技术选型与架构决策.md)。
 
+2026-07 架构调整详见 [桌面采集与数据集 MCP 架构改造方案](桌面采集与数据集MCP架构改造方案.md)。当前主线是桌面端真实浏览器完成采集，MediaCrawler MCP 负责数据集登记、标准化、查询、分析和报告。服务器二维码登录和实时采集保留为实验/兜底能力。
+
 工程落地设计详见 [MediaCrawler MCP 工程设计文档](MediaCrawler_MCP_工程设计文档.md)。
 
 开发任务拆分详见 [MediaCrawler MCP 开发任务拆分](MediaCrawler_MCP_开发任务拆分.md)。
@@ -26,7 +28,7 @@ MediaCrawler Research MCP 是一个面向 AI Agent 的垂直社媒数据采集�
 
 - 数据采集、数据集管理、分析查询之间缺少统一产品抽象。
 - 分析模块主要面向人工 CLI 使用，还不能自然接入 Hermes Agent。
-- 服务端采集缺少登录态管理闭环，未登录时无法把二维码通过飞书等渠道交给用户扫码。
+- 服务端采集的登录态闭环在小红书场景下不稳定，首次登录、滑块和风险验证更适合放到桌面真实浏览器中由用户接管。
 - 搜索结果质量依赖关键词策略，缺少任务级配置、去重、筛选和质量评估。
 - 历史数据没有稳定的数据集 ID、元信息、版本和可追踪产物。
 - Agent 只能“临时查几条”，还不能围绕同一主题反复追问、复用历史数据。
@@ -35,7 +37,7 @@ MediaCrawler Research MCP 是一个面向 AI Agent 的垂直社媒数据采集�
 
 将 MediaCrawler 改造成 Hermes Agent 可调用的研究型数据工具，使 Agent 能够：
 
-- 按主题创建社媒搜索数据集。
+- 登记和管理桌面端采集出的社媒搜索数据集。
 - 对数据集进行可解释的统计分析。
 - 对历史数据集进行结构化查询。
 - 获取报告、榜单、词频、评论洞察等分析产物。
@@ -48,6 +50,7 @@ v1 不做以下事情：
 - 不做发帖、评论、点赞、关注等写操作。
 - 不绕过平台风控、验证码或访问限制。
 - 不承诺大规模、商业化、持续高频采集。
+- 不把服务器扫码登录和实时小红书采集作为生产主链路。
 - 不做复杂情感分析、主题聚类、LLM 自动结论生成。
 - 不替代 Agent Reach 的通用联网检索能力。
 - 不直接提供面向终端用户的 SaaS 管理后台。
@@ -68,15 +71,15 @@ v1 不做以下事情：
 
 Agent 应能：
 
-1. 创建小红书和抖音搜索数据集。
-2. 抓取内容和评论。
-3. 分析高互动内容、评论高频词、用户关切。
-4. 返回报告路径和关键摘要。
-5. 后续用户追问时复用该数据集。
+1. 先检索是否已有相关数据集。
+2. 如果已有数据，分析高互动内容、评论高频词、用户关切。
+3. 如果没有数据，给出桌面采集端的关键词、平台和采集数量建议。
+4. 数据集同步到服务器后，登记、标准化并生成报告。
+5. 返回报告路径和关键摘要，后续用户追问时复用该数据集。
 
 #### 场景 B：竞品/口碑分析
 
-用户给出品牌、产品或关键词，Agent 创建数据集，分析：
+用户给出品牌、产品或关键词，Agent 优先复用已有数据集；没有数据时引导用户通过桌面端采集。数据集可用后分析：
 
 - 热门内容是谁发的。
 - 评论区在夸什么、骂什么、问什么。
@@ -107,9 +110,9 @@ Agent 应能在已有数据集里查询评论和内容，而不是重新爬取�
 v1 聚焦“本地可用、Agent 可调用、分析可信”：
 
 - 支持平台：小红书 `xhs`、抖音 `dy`。
-- 支持采集类型：关键词搜索。
+- 支持采集类型：桌面端关键词搜索结果导入；服务器实时采集作为实验能力。
 - 支持数据类型：内容 `contents`、评论 `comments`。
-- 支持输入来源：现有 MediaCrawler 落盘文件。
+- 支持输入来源：桌面端 MediaCrawler 导出的 dataset bundle、现有 MediaCrawler 落盘文件、手工整理的 raw JSONL。
 - 支持分析输出：HTML 报告、JSON 摘要、CSV 明细、词频 JSON、词云 PNG。
 - 支持 MCP wrapper：通过 MCP 暴露数据集创建、分析、查询、报告获取工具。
 
@@ -135,7 +138,7 @@ v1 聚焦“本地可用、Agent 可调用、分析可信”：
 
 #### 4.1.1 功能描述
 
-系统提供创建搜索数据集的能力。调用方输入平台、关键词、采集数量、评论数量等参数，系统执行爬取并生成可追踪的数据集目录。
+系统提供创建和登记搜索数据集的能力。v1 主链路中，桌面端负责执行爬取并生成可追踪的数据集目录；MCP 负责登记目录、导入 raw 文件、维护元信息并进入分析流程。
 
 #### 4.1.2 输入参数
 
@@ -146,7 +149,8 @@ v1 聚焦“本地可用、Agent 可调用、分析可信”：
 - `max_comments_per_content`: 每条内容最多采集评论数，默认 10。
 - `include_comments`: 是否采集评论，默认 true。
 - `include_sub_comments`: 是否采集二级评论，默认 false。
-- `headless`: 是否无头浏览器，默认 false。
+- `dataset_dir`: 已采集数据集目录，登记已有数据集时必填。
+- `import_mode`: 导入模式，支持 `copy` 或 `link`。
 - `save_format`: 默认 `jsonl`。
 
 #### 4.1.3 输出结果
@@ -162,9 +166,9 @@ v1 聚焦“本地可用、Agent 可调用、分析可信”：
 
 #### 4.1.4 行为要求
 
-- 采集过程必须遵守现有项目的频控配置。
-- 采集失败时需要返回明确错误，不吞掉异常。
-- 如果某个平台失败，其他平台成功，数据集状态为 `partial_success`。
+- 桌面端采集过程必须遵守现有项目的频控配置。
+- MCP 导入失败时需要返回明确错误，不吞掉异常。
+- 如果某个平台数据缺失，其他平台数据可正常登记，数据集状态为 `partial_success` 或 `needs_review`。
 - 数据集目录必须可复用，不依赖一次性终端上下文。
 
 ### 4.2 数据集列表与详情
@@ -275,7 +279,7 @@ v1 文本清洗要求：
 
 #### 4.4.1 功能描述
 
-Agent 可对已有数据集进行轻量查询，返回相关内容或评论。
+Agent 可对已有数据集进行轻量查询，返回相关内容或评论。这是 MCP 的主链路能力，不依赖服务器是否能登录小红书。
 
 #### 4.4.2 查询能力
 
@@ -311,21 +315,44 @@ MCP 返回时不直接传输大文件内容，默认返回本地路径和简短�
 
 ### 5.1 工具列表
 
-#### 5.1.1 `create_search_dataset`
+默认 MCP Server 只启用 `dataset` profile。Hermes Agent 默认只能看到本节工具。
 
-创建搜索数据集。
+```yaml
+tools:
+  dataset: true
+  experimental_collection: false
+```
+
+默认 profile 包含：
+
+```text
+create_dataset
+register_dataset
+validate_dataset_bundle
+import_raw_files
+sync_dataset_manifest
+list_datasets
+get_dataset
+normalize_dataset
+query_dataset
+generate_report
+get_report
+```
+
+QR、login、cookie、server collection 相关工具不属于默认 profile，详见 [Appendix A：Experimental Server Collection Tools](#appendix-aexperimental-server-collection-tools)。
+
+#### 5.1.1 `create_dataset`
+
+创建空数据集目录和元信息，不触发平台采集。
 
 输入：
 
 ```json
 {
-  "platforms": ["xhs", "dy"],
-  "keywords": ["程序员接单", "AI编程接单"],
-  "max_contents": 20,
-  "include_comments": true,
-  "max_comments_per_content": 10,
-  "include_sub_comments": false,
-  "headless": false
+  "name": "AI 编程副业小红书反馈",
+  "platforms": ["xhs"],
+  "keywords": ["AI编程副业", "程序员接单"],
+  "description": "桌面端采集后导入分析"
 }
 ```
 
@@ -333,22 +360,116 @@ MCP 返回时不直接传输大文件内容，默认返回本地路径和简短�
 
 ```json
 {
-  "dataset_id": "20260627_221500_ai_coding_side_job",
+  "dataset_id": "ds_20260705_xhs_ai_coding_side_job",
   "status": "success",
-  "data_paths": {
-    "xhs_contents": "data/datasets/.../xhs_contents.jsonl",
-    "xhs_comments": "data/datasets/.../xhs_comments.jsonl",
-    "dy_contents": "data/datasets/.../dy_contents.jsonl",
-    "dy_comments": "data/datasets/.../dy_comments.jsonl"
+  "dataset_dir": "/data/mediacrawler-mcp/datasets/ds_20260705_xhs_ai_coding_side_job"
+}
+```
+
+#### 5.1.2 `register_dataset`
+
+登记桌面端或其他采集器导出的数据集目录。
+
+输入：
+
+```json
+{
+  "dataset_dir": "/data/inbox/ds_20260705_xhs_ai_coding_side_job",
+  "import_mode": "copy"
+}
+```
+
+输出：
+
+```json
+{
+  "dataset_id": "ds_20260705_xhs_ai_coding_side_job",
+  "status": "success",
+  "dataset_dir": "/data/mediacrawler-mcp/datasets/ds_20260705_xhs_ai_coding_side_job",
+  "message": "dataset registered"
+}
+```
+
+#### 5.1.3 `validate_dataset_bundle`
+
+校验一个待导入数据集目录是否符合标准 bundle 约定。
+
+输入：
+
+```json
+{
+  "dataset_dir": "/data/inbox/ds_20260705_xhs_ai_coding_side_job"
+}
+```
+
+输出：
+
+```json
+{
+  "status": "success",
+  "valid": true,
+  "warnings": [],
+  "files": {
+    "contents": "raw/xhs_contents.jsonl",
+    "comments": "raw/xhs_comments.jsonl"
   }
 }
 ```
 
-#### 5.1.2 `list_datasets`
+#### 5.1.4 `import_raw_files`
 
-列出历史数据集。
+向已有数据集导入 raw JSONL 文件。
 
 输入：
+
+```json
+{
+  "dataset_id": "ds_20260705_xhs_ai_coding_side_job",
+  "platform": "xhs",
+  "contents_path": "/data/inbox/xhs_contents.jsonl",
+  "comments_path": "/data/inbox/xhs_comments.jsonl",
+  "source_keyword": "AI编程副业"
+}
+```
+
+输出：
+
+```json
+{
+  "status": "success",
+  "raw_paths": {
+    "contents": ".../raw/xhs_contents.jsonl",
+    "comments": ".../raw/xhs_comments.jsonl"
+  }
+}
+```
+
+#### 5.1.5 `sync_dataset_manifest`
+
+同步或修复 `dataset.json` 与 SQLite 元数据。
+
+输入：
+
+```json
+{
+  "dataset_id": "ds_20260705_xhs_ai_coding_side_job"
+}
+```
+
+输出：
+
+```json
+{
+  "status": "success",
+  "dataset_id": "ds_20260705_xhs_ai_coding_side_job",
+  "updated": true,
+  "warnings": []
+}
+```
+
+#### 5.1.6 `list_datasets`
+
+列出历史数据集。
 
 ```json
 {
@@ -374,7 +495,57 @@ MCP 返回时不直接传输大文件内容，默认返回本地路径和简短�
 }
 ```
 
-#### 5.1.3 `analyze_dataset`
+#### 5.1.7 `get_dataset`
+
+读取单个数据集详情。
+
+输入：
+
+```json
+{
+  "dataset_id": "ds_20260705_xhs_ai_coding_side_job"
+}
+```
+
+输出：
+
+```json
+{
+  "status": "success",
+  "dataset": {
+    "dataset_id": "ds_20260705_xhs_ai_coding_side_job",
+    "dataset_dir": "...",
+    "platforms": ["xhs"],
+    "keywords": ["AI编程副业"]
+  }
+}
+```
+
+#### 5.1.8 `normalize_dataset`
+
+将 raw JSONL 标准化到 DuckDB。
+
+输入：
+
+```json
+{
+  "dataset_id": "ds_20260705_xhs_ai_coding_side_job",
+  "force": false
+}
+```
+
+输出：
+
+```json
+{
+  "status": "success",
+  "duckdb_path": ".../analysis.duckdb",
+  "content_count": 46,
+  "comment_count": 434
+}
+```
+
+#### 5.1.9 `generate_report`
 
 对数据集生成或刷新分析产物。
 
@@ -401,7 +572,7 @@ MCP 返回时不直接传输大文件内容，默认返回本地路径和简短�
 }
 ```
 
-#### 5.1.4 `query_dataset`
+#### 5.1.10 `query_dataset`
 
 查询已有数据集。
 
@@ -435,7 +606,7 @@ MCP 返回时不直接传输大文件内容，默认返回本地路径和简短�
 }
 ```
 
-#### 5.1.5 `get_dataset_report`
+#### 5.1.11 `get_report`
 
 返回数据集报告位置和摘要。
 
@@ -465,7 +636,47 @@ MCP 返回时不直接传输大文件内容，默认返回本地路径和简短�
 - 输出必须结构化，便于 Agent 继续推理。
 - 大文件只返回路径，不直接塞入上下文。
 - 所有工具必须返回可读错误。
-- 涉及平台登录时，必须提示用户完成扫码或 cookie 配置。
+- 默认 `dataset` profile 不涉及平台登录，不暴露 QR、login、cookie、server collection 工具。
+- 没有合适数据集时，Hermes 应提示用户使用桌面采集端。
+
+## Appendix A：Experimental Server Collection Tools
+
+本附录描述实验 profile，不属于 v1 默认 MCP 工具。
+
+```yaml
+tools:
+  dataset: true
+  experimental_collection: false
+```
+
+显式启用后才注册：
+
+```yaml
+tools:
+  dataset: true
+  experimental_collection: true
+```
+
+工具包括：
+
+```text
+get_login_status
+import_cookies
+start_qrcode_login
+get_qrcode_login_status
+cancel_qrcode_login
+start_collection
+get_task_status
+cancel_task
+```
+
+约束：
+
+- Hermes Agent 默认不得主动调用这些工具。
+- 这些工具仅用于诊断、兼容旧流程、低频实验和服务器环境排查。
+- 它们不是推荐产品主链路。
+- 它们不用于绕过验证码、滑块或平台安全校验。
+- 默认 MCP Server 不注册它们，因此 Hermes 默认不可见。
 
 ## 6. 数据与目录设计
 
@@ -680,22 +891,25 @@ v1 目标：
 - 引入 `dataset.json`。
 - 将现有平台输出复制或归档到统一数据集目录。
 - 支持 `list_datasets` 的本地实现。
+- 支持 `register_dataset` 登记桌面端导出的数据集目录。
+- 支持 `validate_dataset_bundle` 校验 raw JSONL 和 manifest。
 
 ### Milestone 3：MCP wrapper
 
 目标：
 
 - 新增 MCP server。
-- 暴露 `list_datasets`、`analyze_dataset`、`get_dataset_report`。
-- 先不暴露自动爬取，降低复杂度。
+- 暴露 `register_dataset`、`list_datasets`、`analyze_dataset`、`query_dataset`、`get_dataset_report`。
+- 先不依赖服务器自动爬取，降低登录和风控复杂度。
 
-### Milestone 4：采集任务 MCP 化
+### Milestone 4：桌面采集闭环
 
 目标：
 
-- 暴露 `create_search_dataset`。
-- 支持小红书、抖音。
-- 支持任务状态和错误追踪。
+- 桌面端通过真实浏览器完成小红书、抖音采集。
+- 输出标准 dataset bundle。
+- 支持手工或脚本同步到 Hermes 服务器。
+- MCP 可登记并分析同步后的数据集。
 
 ### Milestone 5：查询能力
 
@@ -713,6 +927,15 @@ v1 目标：
 - 增加广告/课程引流标记。
 - 增加平台和关键词对比视图。
 - 可选接入 LLM 总结，但必须附证据。
+
+### Milestone 7：服务器采集实验能力
+
+目标：
+
+- 保留 `start_collection` 等服务器采集能力作为 `experimental_collection` profile。
+- 默认 MCP Server 不注册该 profile。
+- 未登录或触发风控时快速返回可恢复错误。
+- 不把服务器二维码登录作为小红书主链路验收条件。
 
 ## 11. 与 Agent Reach 的关系
 
@@ -745,9 +968,10 @@ MediaCrawler Research MCP 是研究数据层，适合：
 
 应对：
 
+- 将小红书登录、扫码、滑块和风险验证放到桌面真实浏览器中处理。
 - 保持低频采集。
 - 明确提示用户登录状态。
-- 服务端登录态与飞书二维码闭环详见 [服务器登录态与飞书二维码方案](服务器登录态与飞书二维码方案.md)。
+- 服务器登录态与飞书二维码闭环仅作为实验/兜底能力，详见 [服务器登录态与飞书二维码方案](服务器登录态与飞书二维码方案.md)。
 - 单平台失败不影响其他平台。
 - MCP 返回可读错误和恢复建议。
 
@@ -778,6 +1002,7 @@ MediaCrawler Research MCP 是研究数据层，适合：
 应对：
 
 - MCP 工具描述中强调成本和频率。
+- 默认 `dataset` profile 中不注册实验采集工具，降低 Agent 误用概率。
 - 大于默认数量的任务需要显式确认。
 - 优先复用已有数据集。
 
@@ -818,8 +1043,9 @@ MediaCrawler Research MCP 是研究数据层，适合：
 
 1. 继续打磨现有 `analysis` 包。
 2. 引入数据集元信息与统一目录。
-3. 先实现只读 MCP：`list_datasets`、`analyze_dataset`、`get_dataset_report`、`query_dataset`。
-4. 在开放服务端 `create_search_dataset` 前，先完成登录态状态检查与飞书二维码登录闭环。
-5. 最后再开放 `create_search_dataset`，避免一开始就把登录、浏览器、风控、异步任务全部压进 MCP。
+3. 先实现数据集导入 MCP：`register_dataset`、`validate_dataset_bundle`、`import_raw_files`。
+4. 完成 `sync_dataset_manifest`、`list_datasets`、`normalize_dataset`、`query_dataset`、`generate_report`、`get_report`。
+5. 用桌面端真实浏览器完成采集并输出标准 dataset bundle。
+6. 最后再评估 `experimental_collection` profile，避免把登录、浏览器、风控、异步任务重新压进 MCP 主链路。
 
 这条路径能最快让 Hermes Agent 获得“可复用研究数据”的能力，同时避免和 Agent Reach 的即时联网检索能力重复。

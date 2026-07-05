@@ -6,20 +6,19 @@
 
 - [数据采集分析 MCP 产品需求文档](数据采集分析MCP_PRD.md)
 - [技术选型与架构决策](技术选型与架构决策.md)
+- [桌面采集与数据集 MCP 架构改造方案](桌面采集与数据集MCP架构改造方案.md)
 - [服务器登录态与飞书二维码方案](服务器登录态与飞书二维码方案.md)
 
-第一版目标是把 MediaCrawler 从“人工执行爬虫脚本 + 人工找文件分析”升级为“Hermes Agent 可调用的数据集采集、查询和分析工具”。
+第一版目标是把 MediaCrawler 从“人工执行爬虫脚本 + 人工找文件分析”升级为“Hermes Agent 可调用的数据集登记、查询和分析工具”。2026-07 调整后，桌面端真实浏览器负责主采集链路，MCP 负责数据集导入、标准化、查询、报告和历史复用。
 
 开发任务拆分详见 [MediaCrawler MCP 开发任务拆分](MediaCrawler_MCP_开发任务拆分.md)。
 
 第一版优先跑通：
 
 - stdio MCP server。
-- 小红书单平台最小闭环。
-- 服务端二维码登录，二维码由 Hermes 发到飞书。
 - 创建数据集。
-- 启动采集任务。
-- 查询任务状态。
+- 登记桌面端导出的数据集。
+- 导入 raw JSONL 文件。
 - 原始 JSONL 落盘。
 - DuckDB 标准化查询。
 - Markdown、HTML、JSON 摘要报告。
@@ -28,6 +27,8 @@
 
 - 多账号池。
 - 大规模并发采集。
+- 小红书服务器首次扫码登录作为生产主链路。
+- Hermes 自动反复触发服务器实时采集。
 - Web UI。
 - HTTP MCP。
 - 飞书 SDK 内置。
@@ -36,6 +37,15 @@
 ## 2. 总体架构
 
 ```text
+Desktop User
+  |
+  v
+Desktop Collector
+  |
+  | dataset bundle / raw JSONL
+  v
+Dataset Repository
+
 Feishu User
   |
   v
@@ -47,13 +57,18 @@ MediaCrawler MCP Server
   |
   |-- mcp_server        MCP 工具入口
   |-- dataset_service   数据集创建、读取、元数据维护
-  |-- task_manager      任务状态、subprocess 调度
-  |-- crawler_runner    调用 MediaCrawler 采集逻辑
-  |-- login_manager     登录态、二维码、cookie import
+  |-- dataset_importer  数据集目录登记、raw 文件导入、bundle 校验
+  |-- task_manager      导入、标准化、报告任务状态
+  |-- crawler_runner    服务器采集实验适配器
+  |-- login_manager     服务器登录态实验/兜底能力
   |-- normalizer        JSONL -> DuckDB
   |-- query_engine      DuckDB 查询
   |-- report_service    报告生成
   |-- storage           SQLite、文件路径、目录管理
+  |
+  | read/write datasets
+  v
+Dataset Repository
   |
   |-- SQLite metadata
   |-- DuckDB analysis
@@ -65,16 +80,29 @@ Hermes 负责：
 
 - 理解用户意图。
 - 调用 MCP 工具。
-- 将二维码图片路径发送到飞书。
-- 在登录成功后恢复原采集任务。
+- 优先查询和复用已有数据集。
+- 没有数据时提示用户使用桌面采集端。
 - 基于 MCP 返回的结构化摘要做自然语言回复。
+
+Desktop Collector 负责：
+
+- 连接真实 Chrome 或打开可视化浏览器。
+- 让用户完成人工扫码、滑块和风险验证。
+- 低频采集公开内容和评论。
+- 导出标准 dataset bundle。
 
 MediaCrawler MCP 负责：
 
-- 管理数据集、任务、登录会话和报告。
-- 调用 MediaCrawler 完成实际采集。
+- 管理数据集、导入任务和报告。
+- 登记桌面端导出的数据集。
 - 保存原始数据和标准化数据。
 - 生成可被 Hermes 使用的报告和查询结果。
+
+MediaCrawler MCP 不负责：
+
+- 生产主链路中的小红书首次扫码登录。
+- 绕过验证码、滑块或平台安全校验。
+- 默认在服务器上反复重试实时采集。
 
 ## 3. 代码模块划分
 
@@ -88,6 +116,7 @@ mediacrawler_mcp/
   models.py
   storage.py
   dataset_service.py
+  dataset_importer.py
   task_manager.py
   crawler_runner.py
   login_manager.py
@@ -103,7 +132,7 @@ mediacrawler_mcp/
 职责：
 
 - 启动 stdio MCP server。
-- 注册 MCP tools。
+- 按 tool profile 注册 MCP tools。
 - 做输入校验和输出封装。
 - 将请求转发到 service 层。
 
@@ -112,6 +141,17 @@ mediacrawler_mcp/
 - 直接操作 SQLite。
 - 直接拼接爬虫命令。
 - 直接生成报告。
+- 在默认 profile 中注册 QR、login、cookie 或 server collection 工具。
+
+注册规则：
+
+```text
+dataset profile:
+  register dataset/query/report tools
+
+experimental_collection profile:
+  register login/qrcode/server collection tools only when explicitly enabled
+```
 
 ### 3.2 `config.py`
 
@@ -120,6 +160,7 @@ mediacrawler_mcp/
 - 读取环境变量。
 - 维护默认路径。
 - 维护浏览器模式配置。
+- 维护 tool profile 配置。
 
 建议配置：
 
@@ -129,6 +170,8 @@ MEDIACRAWLER_MCP_BROWSER_MODE=persistent_context
 MEDIACRAWLER_MCP_CDP_ENDPOINT=
 MEDIACRAWLER_MCP_MAX_CONCURRENT_TASKS=1
 MEDIACRAWLER_MCP_DEFAULT_TIMEOUT_SECONDS=300
+MEDIACRAWLER_MCP_TOOL_PROFILE=dataset
+MEDIACRAWLER_MCP_ENABLE_EXPERIMENTAL_COLLECTION=false
 ```
 
 ### 3.3 `models.py`
@@ -173,7 +216,32 @@ MEDIACRAWLER_MCP_DEFAULT_TIMEOUT_SECONDS=300
 - 更新 dataset.json。
 - 同步 SQLite 元数据。
 
-### 3.6 `task_manager.py`
+### 3.6 `dataset_importer.py`
+
+职责：
+
+- 登记桌面端或其他采集器导出的 dataset bundle。
+- 校验 `dataset.json`、`raw/` 和必需文件。
+- 支持 `copy` 或 `link` 导入模式。
+- 将散落的 raw JSONL 统一命名为 `xhs_contents.jsonl`、`xhs_comments.jsonl` 等。
+- 在缺少 manifest 时补齐最小 `dataset.json`。
+- 输出 warning，而不是因为非关键字段缺失直接失败。
+
+不负责：
+
+- 调用平台采集。
+- 登录平台账号。
+- 生成分析报告。
+
+建议接口：
+
+```text
+register_dataset(dataset_dir, import_mode) -> Dataset
+validate_dataset_bundle(dataset_dir) -> ValidationResult
+import_raw_files(dataset_id, files, metadata) -> ImportResult
+```
+
+### 3.7 `task_manager.py`
 
 职责：
 
@@ -185,7 +253,7 @@ MEDIACRAWLER_MCP_DEFAULT_TIMEOUT_SECONDS=300
 
 任务状态只反映执行事实，不做业务分析。
 
-### 3.7 `crawler_runner.py`
+### 3.8 `crawler_runner.py`
 
 职责：
 
@@ -194,9 +262,9 @@ MEDIACRAWLER_MCP_DEFAULT_TIMEOUT_SECONDS=300
 - 将采集产物写入或搬运到 dataset raw 目录。
 - 记录 stdout、stderr 和日志路径。
 
-第一版可以通过 subprocess 调用现有 CLI，后续再逐步拆为库调用。
+2026-07 调整后，`crawler_runner.py` 是服务器采集实验适配器，不是生产主链路核心。第一版主链路优先从桌面端导入 dataset bundle。
 
-### 3.8 `login_manager.py`
+### 3.9 `login_manager.py`
 
 职责：
 
@@ -207,9 +275,9 @@ MEDIACRAWLER_MCP_DEFAULT_TIMEOUT_SECONDS=300
 - 导入 cookie。
 - 清除登录态。
 
-第一版优先支持小红书。
+2026-07 调整后，`login_manager.py` 只服务服务器采集实验/兜底路径。小红书生产主链路登录由桌面端真实浏览器和人工接管完成。
 
-### 3.9 `normalizer.py`
+### 3.10 `normalizer.py`
 
 职责：
 
@@ -221,7 +289,7 @@ MEDIACRAWLER_MCP_DEFAULT_TIMEOUT_SECONDS=300
 
 可复用当前 `analysis/loaders.py` 中的加载能力，但 normalizer 应面向数据集目录和 DuckDB。
 
-### 3.10 `query_engine.py`
+### 3.11 `query_engine.py`
 
 职责：
 
@@ -229,7 +297,7 @@ MEDIACRAWLER_MCP_DEFAULT_TIMEOUT_SECONDS=300
 - 支持关键词搜索、平台过滤、source_keyword 过滤。
 - 支持按互动数、点赞数、发布时间排序。
 
-### 3.11 `report_service.py`
+### 3.12 `report_service.py`
 
 职责：
 
@@ -241,7 +309,7 @@ MEDIACRAWLER_MCP_DEFAULT_TIMEOUT_SECONDS=300
 
 第一版可以复用 `analysis/reports.py`，后续再把数据集报告逻辑抽出。
 
-### 3.12 `errors.py`
+### 3.13 `errors.py`
 
 职责：
 
@@ -257,19 +325,18 @@ MEDIACRAWLER_MCP_DEFAULT_TIMEOUT_SECONDS=300
   metadata.sqlite
   logs/
     mcp-server.log
-  browser_profiles/
-    xhs/default/
-    dy/default/
-  login_qrcodes/
-    xhs-login-20260627-221500.png
+  inbox/
+    ds_from_desktop/
   datasets/
     ds_20260627_221500_ai_coding_side_hustle/
       dataset.json
       raw/
         xhs_contents.jsonl
         xhs_comments.jsonl
+      media/
+        images/
       logs/
-        collect_xhs.log
+        import.log
       analysis.duckdb
       reports/
         report.md
@@ -279,6 +346,10 @@ MEDIACRAWLER_MCP_DEFAULT_TIMEOUT_SECONDS=300
         top_comments.csv
         comment_word_freq.json
         comment_word_cloud.png
+  browser_profiles/
+    xhs/default/
+  login_qrcodes/
+    experimental_xhs-login-20260627-221500.png
 ```
 
 本地开发可以允许通过配置改到项目内：
@@ -462,6 +533,22 @@ CREATE TABLE comments (
 
 工具接口以 Hermes 易用为优先，返回结构化结果和本地路径。
 
+2026-07 调整后，默认 MCP Server 只注册 `dataset` profile。QR、login、cookie、server collection 相关工具不注册，Hermes 默认不可见。
+
+默认启动：
+
+```text
+media-crawler-mcp --profile dataset
+```
+
+默认配置：
+
+```yaml
+tools:
+  dataset: true
+  experimental_collection: false
+```
+
 ### 7.1 `create_dataset`
 
 用途：创建数据集目录和元数据，不触发采集。
@@ -494,7 +581,116 @@ CREATE TABLE comments (
 }
 ```
 
-### 7.2 `list_datasets`
+### 7.2 `register_dataset`
+
+用途：登记桌面采集端导出的 dataset bundle。
+
+输入：
+
+```json
+{
+  "dataset_dir": "/data/inbox/ds_20260705_xhs_ai_coding_side_job",
+  "import_mode": "copy"
+}
+```
+
+输出：
+
+```json
+{
+  "status": "success",
+  "dataset_id": "ds_20260705_xhs_ai_coding_side_job",
+  "dataset_dir": "/data/mediacrawler-mcp/datasets/ds_20260705_xhs_ai_coding_side_job",
+  "dataset_json_path": "/data/mediacrawler-mcp/datasets/ds_.../dataset.json",
+  "warnings": []
+}
+```
+
+`import_mode` 说明：
+
+- `copy`: 复制到 MCP home 下，适合服务器持久使用。
+- `link`: 只登记原路径，适合同机共享目录或调试。
+
+### 7.3 `validate_dataset_bundle`
+
+用途：校验待登记目录是否可被 MCP 识别。
+
+输入：
+
+```json
+{
+  "dataset_dir": "/data/inbox/ds_20260705_xhs_ai_coding_side_job"
+}
+```
+
+输出：
+
+```json
+{
+  "status": "success",
+  "valid": true,
+  "warnings": [],
+  "detected_platforms": ["xhs"],
+  "raw_files": {
+    "contents": "raw/xhs_contents.jsonl",
+    "comments": "raw/xhs_comments.jsonl"
+  }
+}
+```
+
+### 7.4 `import_raw_files`
+
+用途：向已有数据集导入 raw JSONL 文件。
+
+输入：
+
+```json
+{
+  "dataset_id": "ds_20260705_xhs_ai_coding_side_job",
+  "platform": "xhs",
+  "contents_path": "/data/inbox/xhs_contents.jsonl",
+  "comments_path": "/data/inbox/xhs_comments.jsonl",
+  "source_keyword": "AI编程副业"
+}
+```
+
+输出：
+
+```json
+{
+  "status": "success",
+  "dataset_id": "ds_20260705_xhs_ai_coding_side_job",
+  "raw_paths": {
+    "contents": "/data/mediacrawler-mcp/datasets/ds_.../raw/xhs_contents.jsonl",
+    "comments": "/data/mediacrawler-mcp/datasets/ds_.../raw/xhs_comments.jsonl"
+  }
+}
+```
+
+### 7.5 `sync_dataset_manifest`
+
+用途：同步或修复 `dataset.json` 与 SQLite 元数据。
+
+输入：
+
+```json
+{
+  "dataset_id": "ds_20260705_xhs_ai_coding_side_job"
+}
+```
+
+输出：
+
+```json
+{
+  "status": "success",
+  "dataset_id": "ds_20260705_xhs_ai_coding_side_job",
+  "updated": true,
+  "warnings": []
+}
+```
+
+### 7.6 `list_datasets`
 
 用途：列出历史数据集。
 
@@ -518,7 +714,7 @@ CREATE TABLE comments (
 }
 ```
 
-### 7.3 `get_dataset`
+### 7.7 `get_dataset`
 
 用途：读取数据集详情。
 
@@ -539,187 +735,7 @@ CREATE TABLE comments (
 }
 ```
 
-### 7.4 `get_login_status`
-
-用途：检查平台是否已登录。
-
-输入：
-
-```json
-{
-  "platform": "xhs"
-}
-```
-
-输出：
-
-```json
-{
-  "status": "logged_out",
-  "platform": "xhs",
-  "account_hint": null,
-  "message": "小红书未登录，请调用 start_login 获取二维码"
-}
-```
-
-### 7.5 `start_login`
-
-用途：启动登录流程并生成二维码图片。
-
-输入：
-
-```json
-{
-  "platform": "xhs",
-  "account_name": "default",
-  "timeout_seconds": 120
-}
-```
-
-输出：
-
-```json
-{
-  "status": "qr_required",
-  "platform": "xhs",
-  "login_session_id": "login_xhs_20260627_221500",
-  "qr_image_path": "/root/.mediacrawler-mcp/login_qrcodes/xhs-login-20260627-221500.png",
-  "qr_image_base64": null,
-  "expires_at": "2026-06-27T22:17:00+08:00",
-  "message": "请使用小红书 App 扫码登录"
-}
-```
-
-### 7.6 `wait_login`
-
-用途：等待或查询登录完成状态。
-
-输入：
-
-```json
-{
-  "login_session_id": "login_xhs_20260627_221500",
-  "timeout_seconds": 120
-}
-```
-
-输出：
-
-```json
-{
-  "status": "success",
-  "platform": "xhs",
-  "message": "小红书登录成功"
-}
-```
-
-### 7.7 `import_cookies`
-
-用途：导入平台 cookie。
-
-输入：
-
-```json
-{
-  "platform": "xhs",
-  "cookie_string": "a=1; web_session=..."
-}
-```
-
-输出：
-
-```json
-{
-  "status": "success",
-  "message": "cookie 已导入，请调用 get_login_status 验证"
-}
-```
-
-### 7.8 `start_collection`
-
-用途：启动采集任务。
-
-输入：
-
-```json
-{
-  "dataset_id": "ds_20260627_221500_ai_coding_side_hustle",
-  "platforms": ["xhs"],
-  "keywords": ["AI编程副业", "程序员接单"],
-  "include_comments": true,
-  "max_contents": 20,
-  "max_comments_per_content": 10,
-  "headless": true
-}
-```
-
-输出：
-
-```json
-{
-  "status": "accepted",
-  "task_id": "task_collect_20260627_221501",
-  "dataset_id": "ds_20260627_221500_ai_coding_side_hustle",
-  "message": "采集任务已启动"
-}
-```
-
-如果未登录：
-
-```json
-{
-  "status": "need_login",
-  "platform": "xhs",
-  "message": "小红书未登录，请先调用 start_login 获取二维码"
-}
-```
-
-### 7.9 `get_task_status`
-
-用途：查询采集、标准化或报告任务状态。
-
-输入：
-
-```json
-{
-  "task_id": "task_collect_20260627_221501"
-}
-```
-
-输出：
-
-```json
-{
-  "status": "running",
-  "task_id": "task_collect_20260627_221501",
-  "progress": 0.35,
-  "log_path": "/root/.mediacrawler-mcp/datasets/ds_.../logs/collect_xhs.log",
-  "message": "正在采集小红书搜索结果"
-}
-```
-
-### 7.10 `cancel_task`
-
-用途：取消正在运行的任务。
-
-输入：
-
-```json
-{
-  "task_id": "task_collect_20260627_221501"
-}
-```
-
-输出：
-
-```json
-{
-  "status": "cancelled",
-  "task_id": "task_collect_20260627_221501"
-}
-```
-
-### 7.11 `normalize_dataset`
+### 7.8 `normalize_dataset`
 
 用途：将 raw JSONL 标准化到 DuckDB。
 
@@ -743,7 +759,7 @@ CREATE TABLE comments (
 }
 ```
 
-### 7.12 `query_dataset`
+### 7.9 `query_dataset`
 
 用途：查询历史数据集。
 
@@ -780,7 +796,7 @@ CREATE TABLE comments (
 }
 ```
 
-### 7.13 `generate_report`
+### 7.10 `generate_report`
 
 用途：生成或刷新报告。
 
@@ -813,7 +829,7 @@ CREATE TABLE comments (
 }
 ```
 
-### 7.14 `get_report`
+### 7.11 `get_report`
 
 用途：获取已有报告路径和摘要。
 
@@ -841,6 +857,37 @@ CREATE TABLE comments (
 ```
 
 ## 8. 采集任务生命周期
+
+2026-07 调整后，主生命周期是数据集导入和分析生命周期：
+
+```mermaid
+stateDiagram-v2
+    [*] --> imported
+    imported --> validating
+    validating --> registered
+    validating --> needs_review
+    registered --> normalizing
+    normalizing --> ready
+    normalizing --> failed
+    ready --> reporting
+    reporting --> ready
+    needs_review --> registered: user fixes metadata/files
+    failed --> [*]
+    ready --> [*]
+```
+
+状态说明：
+
+- `imported`: 数据集目录或 raw 文件已进入 MCP 可访问路径。
+- `validating`: 正在校验 manifest 和 raw 文件。
+- `registered`: 已写入 SQLite 元数据，可进入标准化。
+- `needs_review`: 可识别但存在缺字段、缺文件或平台不完整，需要人工确认。
+- `normalizing`: 正在写入 DuckDB。
+- `ready`: 可查询。
+- `reporting`: 正在生成报告。
+- `failed`: 导入、标准化或报告失败。
+
+服务器实时采集生命周期仅属于 `experimental_collection` profile。该 profile 默认关闭；默认 MCP Server 不注册这些 tools。
 
 ```mermaid
 stateDiagram-v2
@@ -871,7 +918,47 @@ stateDiagram-v2
 - `cancelled`: 用户取消。
 - `interrupted`: MCP server 或 subprocess 非正常中断后恢复出的状态。
 
-## 9. 登录态与二维码流程
+## 9. Experimental Server Collection Tools
+
+本章节描述 `experimental_collection` profile。它默认不启用，Hermes 默认看不到 QR、login、cookie、server collection 相关工具。
+
+启用方式：
+
+```text
+media-crawler-mcp --enable-experimental-collection
+```
+
+或：
+
+```yaml
+tools:
+  dataset: true
+  experimental_collection: true
+```
+
+工具列表：
+
+```text
+get_login_status
+import_cookies
+start_qrcode_login
+get_qrcode_login_status
+cancel_qrcode_login
+start_collection
+get_task_status
+cancel_task
+```
+
+Agent 约束：
+
+- Hermes Agent 默认不得主动调用这些工具。
+- 这些工具仅用于诊断、兼容旧流程、低频实验和服务器环境排查。
+- 它们不是推荐产品主链路。
+- 它们不用于绕过验证码、滑块或平台安全校验。
+
+### 9.1 登录态与二维码实验流程
+
+该流程属于服务器采集实验/兜底路径，不是 2026-07 后的生产主链路。小红书生产主链路应在桌面真实浏览器中完成登录和验证，再导出数据集。
 
 ```mermaid
 sequenceDiagram
@@ -905,6 +992,7 @@ sequenceDiagram
 - 二维码必须保存为本地 PNG。
 - 二维码过期后返回 `expired`。
 - 登录成功后持久化 profile，后续采集复用。
+- 以上能力只有 `experimental_collection` profile 显式启用时才注册。
 
 ## 10. 数据标准化流程
 
@@ -1091,6 +1179,9 @@ INTERNAL_ERROR
 
 ```yaml
 home_dir: ~/.mediacrawler-mcp
+tools:
+  dataset: true
+  experimental_collection: false
 browser:
   mode: persistent_context
   cdp_endpoint: null
@@ -1109,6 +1200,8 @@ analysis:
 
 环境变量优先级高于配置文件。
 
+默认 `tools.experimental_collection=false`。在该默认配置下，`browser` 相关配置不会导致 QR、login、cookie、server collection tools 被注册。
+
 ## 14. 与现有代码的集成点
 
 ### 14.1 `analysis` 包
@@ -1123,7 +1216,15 @@ MCP 报告服务应复用这些能力，但需要增加 dataset 级入口。
 
 ### 14.2 MediaCrawler CLI
 
-第一版 `crawler_runner` 可以通过 subprocess 调用：
+桌面端第一版可以直接使用现有 MediaCrawler CLI 或 CDP 模式采集：
+
+```bash
+uv run python main.py --platform xhs --lt qrcode --type search --save_data_option json
+```
+
+采集完成后，通过导出脚本或手工整理成 dataset bundle，再复制到服务器并调用 `register_dataset`。
+
+服务器实验路径中，`crawler_runner` 仍可以通过 subprocess 调用：
 
 ```bash
 uv run python main.py --platform xhs --lt qrcode --type search --keywords "..." --save_data_option jsonl
@@ -1146,7 +1247,7 @@ file png
 base64
 ```
 
-第一版 MCP 使用 `file png`。
+2026-07 调整后，二维码输出不再是生产主线。若继续保留服务器二维码实验能力，MCP 使用 `file png`，并明确失败不影响数据集查询和报告。
 
 ## 15. 测试计划
 
@@ -1176,11 +1277,11 @@ base64
 
 覆盖：
 
-- 小红书二维码登录。
-- Hermes 发送二维码到飞书。
-- 用户扫码后继续采集。
-- 登录失效时返回 `need_login`。
-- 小红书搜索采集 raw JSONL。
+- 桌面端通过真实浏览器完成小红书采集。
+- 桌面端输出 dataset bundle。
+- 将 dataset bundle 复制或同步到服务器。
+- Hermes 调用 `register_dataset`、`normalize_dataset`、`query_dataset`、`generate_report`。
+- 服务器二维码登录只作为实验验证项。
 
 ### 15.4 暂不自动化
 
@@ -1203,32 +1304,32 @@ base64
 - `mediacrawler_mcp/dataset_service.py`
 - tools: `create_dataset`、`list_datasets`、`get_dataset`
 
-### Phase 2：小红书登录闭环
+### Phase 2：桌面数据集导入
 
 目标：
 
-- 服务端能生成小红书二维码 PNG。
-- Hermes 能把二维码发给飞书用户。
-- 用户扫码后登录态可复用。
+- 能登记桌面端导出的 dataset bundle。
+- 能校验 raw JSONL 和 `dataset.json`。
+- 能向已有 dataset 导入 raw 文件。
 
 交付：
 
-- `login_manager.py`
-- tools: `get_login_status`、`start_login`、`wait_login`、`import_cookies`
+- `dataset_importer.py`
+- tools: `register_dataset`、`validate_dataset_bundle`、`import_raw_files`
 
-### Phase 3：小红书采集任务
+### Phase 3：桌面采集最小闭环
 
 目标：
 
-- subprocess 启动小红书搜索采集。
-- 任务状态可查询。
-- raw JSONL 进入 dataset 目录。
+- 使用现有 MediaCrawler 在桌面端完成小红书搜索采集。
+- 导出标准 dataset bundle。
+- bundle 可进入服务器 MCP 分析链路。
 
 交付：
 
-- `task_manager.py`
-- `crawler_runner.py`
-- tools: `start_collection`、`get_task_status`、`cancel_task`
+- 桌面采集导出说明或脚本。
+- dataset bundle 示例。
+- Hermes 导入验证流程。
 
 ### Phase 4：DuckDB 标准化与查询
 
@@ -1255,7 +1356,24 @@ base64
 - `report_service.py`
 - tools: `generate_report`、`get_report`
 
-### Phase 6：抖音与多关键词增强
+### Phase 6：服务器采集实验能力
+
+目标：
+
+- 实现 `experimental_collection` profile。
+- 默认不启用该 profile。
+- 仅显式启用时保留服务器 `start_collection` 调试能力。
+- 仅显式启用时保留二维码登录、cookie import、CDP 作为兜底能力。
+- 未登录或触发风控时快速返回可恢复错误。
+
+交付：
+
+- `login_manager.py`
+- `crawler_runner.py`
+- profile gate: `MEDIACRAWLER_MCP_ENABLE_EXPERIMENTAL_COLLECTION=false`
+- tools: `get_login_status`、`import_cookies`、`start_qrcode_login`、`get_qrcode_login_status`、`cancel_qrcode_login`、`start_collection`、`get_task_status`、`cancel_task`
+
+### Phase 7：抖音与多关键词增强
 
 目标：
 
@@ -1268,21 +1386,22 @@ base64
 第一版验收：
 
 - Hermes 能通过 stdio MCP 创建数据集。
-- 未登录小红书时，采集返回 `need_login`。
-- MCP 能生成二维码 PNG 路径。
-- Hermes 能将二维码发到飞书。
-- 用户扫码后，小红书登录态可复用。
-- MCP 能启动小红书采集任务，并返回 task_id。
-- `get_task_status` 能看到任务完成或失败。
+- MCP 能登记桌面端导出的 dataset bundle。
+- MCP 能校验 dataset bundle 并返回 warning。
+- MCP 能向已有 dataset 导入 raw JSONL。
 - 原始 JSONL 写入 dataset raw 目录。
 - DuckDB 中存在标准化 `contents` 和 `comments` 表。
 - `query_dataset` 能查询历史评论。
 - `generate_report` 能输出 Markdown、HTML、summary JSON。
+- 没有可用数据集时，Hermes 提示用户用桌面端采集，而不是反复触发服务器扫码。
+- 默认 Hermes 工具列表中不存在 QR、login、cookie、server collection 相关工具。
+- 启用 `experimental_collection` profile 必须是显式配置，不是默认行为。
 
 ## 18. 未决问题
 
 - 现有 MediaCrawler CLI 输出目录如何最小改造到 dataset raw。
-- 小红书二维码 DOM 获取和 PNG 保存需要实际验证。
+- 桌面端 dataset bundle 导出脚本如何与现有 `data/` 输出最小集成。
+- 小红书二维码 DOM 获取和 PNG 保存仅作为服务器实验路径验证。
 - 抖音登录态是否需要额外保存 localStorage。
 - DuckDB 每数据集一个库还是全局一个库，第一版暂定每数据集一个库。
 - MCP Python SDK 的具体版本和 Hermes 配置格式需要在服务器环境验证。

@@ -5,6 +5,8 @@ from mediacrawler_mcp.config import DEFAULT_HOME, load_config
 
 def test_load_config_uses_default_home(monkeypatch):
     monkeypatch.delenv("MEDIACRAWLER_MCP_HOME", raising=False)
+    monkeypatch.delenv("MEDIACRAWLER_MCP_TOOL_PROFILE", raising=False)
+    monkeypatch.delenv("MEDIACRAWLER_MCP_ENABLE_EXPERIMENTAL_COLLECTION", raising=False)
 
     config = load_config()
 
@@ -12,6 +14,8 @@ def test_load_config_uses_default_home(monkeypatch):
     assert config.datasets_dir == DEFAULT_HOME / "datasets"
     assert config.metadata_db_path == DEFAULT_HOME / "metadata.sqlite"
     assert config.server_log_path == DEFAULT_HOME / "logs" / "server.log"
+    assert config.tool_profile == "dataset"
+    assert config.enable_experimental_collection is False
 
 
 def test_load_config_uses_environment_home(monkeypatch, tmp_path):
@@ -31,6 +35,8 @@ def test_load_config_reads_optional_environment_values(monkeypatch, tmp_path):
     monkeypatch.setenv("MEDIACRAWLER_MCP_CDP_ENDPOINT", "http://127.0.0.1:9222")
     monkeypatch.setenv("MEDIACRAWLER_MCP_MAX_CONCURRENT_TASKS", "2")
     monkeypatch.setenv("MEDIACRAWLER_MCP_DEFAULT_TIMEOUT_SECONDS", "120")
+    monkeypatch.setenv("MEDIACRAWLER_MCP_TOOL_PROFILE", "dataset")
+    monkeypatch.setenv("MEDIACRAWLER_MCP_ENABLE_EXPERIMENTAL_COLLECTION", "true")
 
     config = load_config()
 
@@ -38,3 +44,16 @@ def test_load_config_reads_optional_environment_values(monkeypatch, tmp_path):
     assert config.cdp_endpoint == "http://127.0.0.1:9222"
     assert config.max_concurrent_tasks == 2
     assert config.default_timeout_seconds == 120
+    assert config.tool_profile == "dataset"
+    assert config.enable_experimental_collection is True
+
+
+def test_experimental_collection_profile_enables_experimental_tools(monkeypatch, tmp_path):
+    monkeypatch.setenv("MEDIACRAWLER_MCP_HOME", str(tmp_path))
+    monkeypatch.setenv("MEDIACRAWLER_MCP_TOOL_PROFILE", "experimental_collection")
+    monkeypatch.delenv("MEDIACRAWLER_MCP_ENABLE_EXPERIMENTAL_COLLECTION", raising=False)
+
+    config = load_config()
+
+    assert config.tool_profile == "experimental_collection"
+    assert config.enable_experimental_collection is True

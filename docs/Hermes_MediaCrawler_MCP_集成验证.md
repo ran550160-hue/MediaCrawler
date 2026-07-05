@@ -2,6 +2,8 @@
 
 本文档对应 Sprint 6，目标是把 `mediacrawler_mcp` 以 stdio MCP server 的方式接入 Hermes，并验证 Hermes 能发现、调用工具，以及能把报告路径回传到飞书。
 
+2026-07 调整：Hermes 集成验证的主链路改为“桌面采集后的数据集导入、查询和报告”。服务器二维码登录和实时采集保留为实验/兜底路径，不作为 MCP 接入是否成功的判断标准。详见 [桌面采集与数据集 MCP 架构改造方案](桌面采集与数据集MCP架构改造方案.md)。
+
 ## 1. 前置条件
 
 - Hermes 服务器已安装 MCP Python SDK，当前已确认 `mcp==1.26.0` 可用。
@@ -53,6 +55,8 @@ mcp_servers:
     env:
       MEDIACRAWLER_MCP_HOME: /data/mediacrawler-mcp
       PYTHONPATH: /opt/mediacrawler/MediaCrawler
+      MEDIACRAWLER_MCP_TOOL_PROFILE: dataset
+      MEDIACRAWLER_MCP_ENABLE_EXPERIMENTAL_COLLECTION: "false"
 ```
 
 `server.py` 会自动把 repo root 注入 `sys.path`，因此缺少 `PYTHONPATH` 时也可以启动；但部署配置中仍建议显式设置 `PYTHONPATH`，方便后续脚本、测试和 Hermes 子进程行为保持一致。
@@ -92,6 +96,9 @@ uv run python scripts/hermes_mcp_smoke.py
   "dataset_id": "ds_...",
   "tool_name_hint": [
     "mcp_mediacrawler_create_dataset",
+    "mcp_mediacrawler_register_dataset",
+    "mcp_mediacrawler_validate_dataset_bundle",
+    "mcp_mediacrawler_import_raw_files",
     "mcp_mediacrawler_query_dataset",
     "mcp_mediacrawler_generate_report"
   ],
@@ -112,13 +119,26 @@ uv run python scripts/hermes_mcp_smoke.py --home /tmp/mediacrawler-mcp-smoke
 
 ## 5. Hermes 会话内工具验证
 
-Hermes 侧工具名通常会变成：
+默认 `dataset` profile 下，Hermes 侧工具名通常会变成：
 
 ```text
 mcp_mediacrawler_ping
 mcp_mediacrawler_create_dataset
+mcp_mediacrawler_register_dataset
+mcp_mediacrawler_validate_dataset_bundle
+mcp_mediacrawler_import_raw_files
+mcp_mediacrawler_sync_dataset_manifest
 mcp_mediacrawler_list_datasets
 mcp_mediacrawler_get_dataset
+mcp_mediacrawler_normalize_dataset
+mcp_mediacrawler_query_dataset
+mcp_mediacrawler_generate_report
+mcp_mediacrawler_get_report
+```
+
+默认工具列表中不应出现：
+
+```text
 mcp_mediacrawler_get_login_status
 mcp_mediacrawler_import_cookies
 mcp_mediacrawler_start_qrcode_login
@@ -127,11 +147,9 @@ mcp_mediacrawler_cancel_qrcode_login
 mcp_mediacrawler_start_collection
 mcp_mediacrawler_get_task_status
 mcp_mediacrawler_cancel_task
-mcp_mediacrawler_normalize_dataset
-mcp_mediacrawler_query_dataset
-mcp_mediacrawler_generate_report
-mcp_mediacrawler_get_report
 ```
+
+如果这些工具在默认 Hermes 会话中可见，说明 MCP Server 配置错误或意外启用了 `experimental_collection` profile。
 
 建议在 Hermes 新会话中按以下顺序测试：
 
@@ -149,27 +167,58 @@ mcp_mediacrawler_get_report
 
 3. 调用 `mcp_mediacrawler_list_datasets`，确认能看到刚创建的数据集。
 4. 调用 `mcp_mediacrawler_get_dataset`，确认返回 `dataset_dir` 和 `dataset_json_path`。
-5. 对已有 raw 数据集调用 `mcp_mediacrawler_normalize_dataset`。
-6. 调用 `mcp_mediacrawler_query_dataset`。
-7. 调用 `mcp_mediacrawler_generate_report`。
-8. 调用 `mcp_mediacrawler_get_report`。
+5. 对桌面端导出的目录调用 `mcp_mediacrawler_validate_dataset_bundle`。
+6. 调用 `mcp_mediacrawler_register_dataset`。
+7. 必要时调用 `mcp_mediacrawler_import_raw_files` 或 `mcp_mediacrawler_sync_dataset_manifest`。
+8. 调用 `mcp_mediacrawler_normalize_dataset`。
+9. 调用 `mcp_mediacrawler_query_dataset`。
+10. 调用 `mcp_mediacrawler_generate_report`。
+11. 调用 `mcp_mediacrawler_get_report`。
 
-注意：`start_collection` 会检查小红书登录态。服务器未登录时，预期返回：
+在导入工具落地前，可继续使用 smoke 脚本写入 fixture raw JSONL 来验证分析主链路。
 
-```json
-{
-  "status": "need_login",
-  "error": {
-    "code": "LOGIN_REQUIRED"
-  }
-}
+## 6. 推荐主链路：桌面采集后导入
+
+推荐生产流程：
+
+1. 在用户桌面端使用真实 Chrome/CDP/headful Playwright 完成小红书登录、验证和采集。
+2. 桌面端导出标准 dataset bundle。
+3. 将 bundle 复制或同步到 Hermes 服务器，例如 `/data/mediacrawler-mcp/inbox/<dataset_id>`。
+4. Hermes 调用 `register_dataset` 登记数据集。
+5. Hermes 调用 `normalize_dataset`、`query_dataset`、`generate_report`。
+
+如果当前版本尚未实现 `register_dataset`，可以先将 raw JSONL 放入已创建 dataset 的 `raw/` 目录，再运行离线 smoke 或手动调用 `normalize_dataset`。
+
+## Appendix A：Experimental Server Collection Tools
+
+本节描述服务器采集实验/兜底路径，不是推荐生产主链路。默认 `dataset` profile 不注册本节工具，Hermes 默认不可见。
+
+显式启用方式：
+
+```yaml
+mcp_servers:
+  mediacrawler-experimental:
+    command: /opt/mediacrawler/MediaCrawler/.venv/bin/python
+    args:
+      - /opt/mediacrawler/MediaCrawler/mediacrawler_mcp/server.py
+    enabled: true
+    timeout: 300
+    connect_timeout: 60
+    env:
+      MEDIACRAWLER_MCP_HOME: /data/mediacrawler-mcp
+      PYTHONPATH: /opt/mediacrawler/MediaCrawler
+      MEDIACRAWLER_MCP_TOOL_PROFILE: dataset
+      MEDIACRAWLER_MCP_ENABLE_EXPERIMENTAL_COLLECTION: "true"
 ```
 
-这是正常行为，不应视为 MCP 接入失败。
+启用约束：
 
-## 6. 登录与浏览器模式现状
+- Hermes Agent 默认不得主动调用实验工具。
+- 仅用于诊断、兼容旧流程、低频实验和服务器环境排查。
+- 不用于推荐产品主链路。
+- 不用于绕过验证码、滑块或平台安全校验。
 
-当前 Sprint 6 推荐优先使用 cookie 模式完成服务器采集：
+当前如果必须测试服务器采集，可优先使用 cookie 模式：
 
 1. 在浏览器中导出小红书 cookie。
 2. 调用 `mcp_mediacrawler_import_cookies`，导入包含 `web_session` 的完整 cookie string。
@@ -200,11 +249,11 @@ MCP 默认 `MEDIACRAWLER_MCP_BROWSER_MODE=persistent_context`，采集命令会�
 
 如果走 persistent browser profile，也需要让 `LoginManager` 检测到的 profile 与 `CrawlerRunner` 实际启动爬虫使用的 profile 保持一致。
 
-小红书搜索接口一页通常返回 20 条。若 Hermes 调用 `start_collection(max_contents=1/3/5)`，当前 MCP 会把数量限制前移到小红书 detail 请求构造前，避免对整页 20 条内容发起 detail 请求；raw 归档阶段仍会做兜底裁剪。
+小红书搜索接口一页通常返回 20 条。若在 `experimental_collection` profile 中调用 `start_collection(max_contents=1/3/5)`，当前 MCP 会把数量限制前移到小红书 detail 请求构造前，避免对整页 20 条内容发起 detail 请求；raw 归档阶段仍会做兜底裁剪。
 
 ### 二维码登录流程
 
-如果 cookie 过期或不方便手动复制 cookie，可以让 Hermes 走二维码登录：
+如果 cookie 过期或不方便手动复制 cookie，可以让 Hermes 走二维码登录实验路径：
 
 1. 调用 `mcp_mediacrawler_start_qrcode_login`。
 2. MCP 返回：
@@ -250,7 +299,7 @@ MCP 默认 `MEDIACRAWLER_MCP_BROWSER_MODE=persistent_context`，采集命令会�
 
 更新 QR login 或 collection 相关代码后，需要在 Hermes/Gateway 侧执行 `/reload-mcp` 或重启进程，确保加载到最新 MCP server。
 
-生产环境建议 Hermes/飞书入口调用 `mcp_mediacrawler_start_collection(..., verify_login_remote=true)`，避免本地 cookie 文件存在但实际已过期时继续启动 Playwright。当前 MCP 默认值也是 `true`，只有低频调试或明确要减少远程校验请求时才建议显式传 `false`。
+服务器采集实验路径若调用 `mcp_mediacrawler_start_collection`，建议传 `verify_login_remote=true`，避免本地 cookie 文件存在但实际已过期时继续启动 Playwright。生产主链路仍应优先使用桌面采集后的 dataset bundle。
 
 `start_collection` 会在启动 crawler 前执行 preflight：登录远程验证、账号采集权限验证、CDP endpoint、输出路径等。失败时会返回 `PREFLIGHT_FAILED` 和 `checks` 列表，不会启动 Playwright。若账号已登录但无采集权限，预期错误码为 `XHS_PERMISSION_DENIED` 或 `permission_denied`。
 
@@ -260,7 +309,7 @@ MCP 默认 `MEDIACRAWLER_MCP_BROWSER_MODE=persistent_context`，采集命令会�
 
 SSH/Xshell 服务器环境建议在启动 Hermes/Gateway 前执行 `unset DISPLAY`，或用 `DISPLAY=` 启动服务，避免 X11 forwarding 触发 Xmanager 弹窗影响 Playwright。
 
-## 7. 飞书结果路径验证
+## 8. 飞书结果路径验证
 
 当前 MCP 报告工具返回本地服务器路径：
 
@@ -279,9 +328,9 @@ HTML: /data/mediacrawler-mcp/datasets/ds_xxx/reports/report.html
 
 如果飞书侧不能直接打开服务器本地路径，Hermes 后续需要补一层文件读取或上传能力。MediaCrawler MCP 第一版只负责生成文件和返回路径，不直接依赖飞书 SDK。
 
-## 8. 图片路径预验证
+## Appendix B：图片路径预验证
 
-Sprint 7 会做二维码 PNG 输出。Sprint 6 先确认 Hermes/飞书是否能处理本地图片路径：
+若显式启用服务器二维码实验能力，需要确认 Hermes/飞书是否能处理本地图片路径：
 
 - 如果 Hermes 已有文件上传 skill 或飞书图片上传能力，验证能上传本地 PNG。
 - 如果只能发送文本，则二维码阶段需要 Hermes 读取 `qr_image_path` 后主动上传图片。
@@ -292,7 +341,7 @@ Sprint 7 会做二维码 PNG 输出。Sprint 6 先确认 Hermes/飞书是否能�
 ```text
 飞书文本路径回传：待服务器验证
 飞书本地图片上传：待服务器验证
-二维码 PNG 上传：Sprint 7 验证
+二维码 PNG 上传：Sprint 7 实验路径验证
 ```
 
 ## 9. 验收标准
@@ -300,6 +349,7 @@ Sprint 7 会做二维码 PNG 输出。Sprint 6 先确认 Hermes/飞书是否能�
 - Hermes 新会话能发现 `mediacrawler` MCP tools。
 - `ping/create_dataset/list_datasets/get_dataset` 可直接调用成功。
 - 对已有 raw 数据集，`normalize_dataset/query_dataset/generate_report/get_report` 可调用成功。
-- 未登录时 `start_collection` 返回 `need_login`，不会长时间卡住。
+- `validate_dataset_bundle/register_dataset/import_raw_files/sync_dataset_manifest` 可调用成功。
+- 默认 Hermes 工具列表中不存在 QR、login、cookie、server collection 相关工具。
 - 飞书用户能收到报告摘要和报告文件路径。
 - 如果飞书不能直接使用本地路径或图片路径，约束记录到本文档。

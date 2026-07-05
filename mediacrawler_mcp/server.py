@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import argparse
 import logging
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -12,6 +14,7 @@ if str(REPO_ROOT) not in sys.path:
 from mcp.server.fastmcp import FastMCP
 
 from mediacrawler_mcp.config import load_config
+from mediacrawler_mcp.dataset_importer import DatasetImporter
 from mediacrawler_mcp.dataset_service import DatasetService
 from mediacrawler_mcp.errors import ErrorCode, McpAppError, error_result, success_result
 from mediacrawler_mcp.login_manager import LoginManager
@@ -22,6 +25,21 @@ from mediacrawler_mcp.report_service import ReportService
 from mediacrawler_mcp.storage import Storage
 from mediacrawler_mcp.task_manager import TaskManager
 from mediacrawler_mcp.utils import setup_file_logging
+
+
+def _apply_cli_profile_overrides(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--profile")
+    parser.add_argument("--enable-experimental-collection", action="store_true")
+    args, _ = parser.parse_known_args(argv)
+
+    if args.profile in {"dataset", "experimental_collection"}:
+        os.environ["MEDIACRAWLER_MCP_TOOL_PROFILE"] = args.profile
+    if args.enable_experimental_collection:
+        os.environ["MEDIACRAWLER_MCP_ENABLE_EXPERIMENTAL_COLLECTION"] = "true"
+
+
+_apply_cli_profile_overrides(sys.argv[1:])
 
 
 mcp = FastMCP("mediacrawler")
@@ -38,6 +56,13 @@ def _storage() -> Storage:
     config = load_config()
     setup_file_logging(config.server_log_path)
     return Storage(config)
+
+
+def _importer() -> DatasetImporter:
+    config = load_config()
+    setup_file_logging(config.server_log_path)
+    storage = Storage(config)
+    return DatasetImporter(config, storage)
 
 
 @mcp.tool()
@@ -94,6 +119,68 @@ def list_datasets(
     except Exception as exc:  # pragma: no cover - safety boundary for MCP tools
         logging.exception("Failed to list datasets")
         return error_result(ErrorCode.INTERNAL_ERROR, "Failed to list datasets", str(exc))
+
+
+@mcp.tool()
+def register_dataset(dataset_dir: str, import_mode: str = "copy") -> dict[str, Any]:
+    """Register a desktop-exported dataset bundle."""
+    try:
+        return success_result(**_importer().register_dataset(dataset_dir=dataset_dir, import_mode=import_mode))
+    except McpAppError as exc:
+        return exc.to_result()
+    except Exception as exc:  # pragma: no cover - safety boundary for MCP tools
+        logging.exception("Failed to register dataset")
+        return error_result(ErrorCode.INTERNAL_ERROR, "Failed to register dataset", str(exc))
+
+
+@mcp.tool()
+def validate_dataset_bundle(dataset_dir: str) -> dict[str, Any]:
+    """Validate a desktop-exported dataset bundle before registration."""
+    try:
+        return success_result(**_importer().validate_dataset_bundle(dataset_dir=dataset_dir))
+    except McpAppError as exc:
+        return exc.to_result()
+    except Exception as exc:  # pragma: no cover - safety boundary for MCP tools
+        logging.exception("Failed to validate dataset bundle")
+        return error_result(ErrorCode.INTERNAL_ERROR, "Failed to validate dataset bundle", str(exc))
+
+
+@mcp.tool()
+def import_raw_files(
+    dataset_id: str,
+    platform: str,
+    contents_path: str | None = None,
+    comments_path: str | None = None,
+    source_keyword: str | None = None,
+) -> dict[str, Any]:
+    """Import raw JSONL files into an existing dataset."""
+    try:
+        return success_result(
+            **_importer().import_raw_files(
+                dataset_id=dataset_id,
+                platform=platform,
+                contents_path=contents_path,
+                comments_path=comments_path,
+                source_keyword=source_keyword,
+            )
+        )
+    except McpAppError as exc:
+        return exc.to_result()
+    except Exception as exc:  # pragma: no cover - safety boundary for MCP tools
+        logging.exception("Failed to import raw files")
+        return error_result(ErrorCode.INTERNAL_ERROR, "Failed to import raw files", str(exc))
+
+
+@mcp.tool()
+def sync_dataset_manifest(dataset_id: str) -> dict[str, Any]:
+    """Synchronize dataset.json, SQLite metadata, and raw file metadata."""
+    try:
+        return success_result(**_importer().sync_dataset_manifest(dataset_id=dataset_id))
+    except McpAppError as exc:
+        return exc.to_result()
+    except Exception as exc:  # pragma: no cover - safety boundary for MCP tools
+        logging.exception("Failed to sync dataset manifest")
+        return error_result(ErrorCode.INTERNAL_ERROR, "Failed to sync dataset manifest", str(exc))
 
 
 @mcp.tool()
@@ -184,7 +271,6 @@ def get_report(dataset_id: str, report_id: str | None = None) -> dict[str, Any]:
         return error_result(ErrorCode.INTERNAL_ERROR, "Failed to get report", str(exc))
 
 
-@mcp.tool()
 def get_login_status(
     platform: str = "xhs",
     account_name: str = "default",
@@ -206,7 +292,6 @@ def get_login_status(
         return error_result(ErrorCode.INTERNAL_ERROR, "Failed to get login status", str(exc))
 
 
-@mcp.tool()
 def import_cookies(
     platform: str,
     cookie_string: str,
@@ -226,7 +311,6 @@ def import_cookies(
         return error_result(ErrorCode.INTERNAL_ERROR, "Failed to import cookies", str(exc))
 
 
-@mcp.tool()
 def start_qrcode_login(
     platform: str = "xhs",
     account_name: str = "default",
@@ -250,7 +334,6 @@ def start_qrcode_login(
         return error_result(ErrorCode.INTERNAL_ERROR, "Failed to start QR login", str(exc))
 
 
-@mcp.tool()
 def get_qrcode_login_status(login_task_id: str) -> dict[str, Any]:
     """Get QR-code login task status."""
     try:
@@ -262,7 +345,6 @@ def get_qrcode_login_status(login_task_id: str) -> dict[str, Any]:
         return error_result(ErrorCode.INTERNAL_ERROR, "Failed to get QR login status", str(exc))
 
 
-@mcp.tool()
 def cancel_qrcode_login(login_task_id: str) -> dict[str, Any]:
     """Cancel an active QR-code login task."""
     try:
@@ -274,7 +356,6 @@ def cancel_qrcode_login(login_task_id: str) -> dict[str, Any]:
         return error_result(ErrorCode.INTERNAL_ERROR, "Failed to cancel QR login", str(exc))
 
 
-@mcp.tool()
 def start_collection(
     dataset_id: str,
     include_comments: bool = True,
@@ -305,7 +386,6 @@ def start_collection(
         return error_result(ErrorCode.INTERNAL_ERROR, "Failed to start collection", str(exc))
 
 
-@mcp.tool()
 def get_task_status(task_id: str) -> dict[str, Any]:
     """Get a MediaCrawler MCP task status."""
     try:
@@ -317,7 +397,6 @@ def get_task_status(task_id: str) -> dict[str, Any]:
         return error_result(ErrorCode.INTERNAL_ERROR, "Failed to get task status", str(exc))
 
 
-@mcp.tool()
 def cancel_task(task_id: str) -> dict[str, Any]:
     """Cancel a running MediaCrawler MCP task."""
     try:
@@ -327,6 +406,29 @@ def cancel_task(task_id: str) -> dict[str, Any]:
     except Exception as exc:  # pragma: no cover - safety boundary for MCP tools
         logging.exception("Failed to cancel task")
         return error_result(ErrorCode.INTERNAL_ERROR, "Failed to cancel task", str(exc))
+
+
+EXPERIMENTAL_COLLECTION_TOOLS = (
+    get_login_status,
+    import_cookies,
+    start_qrcode_login,
+    get_qrcode_login_status,
+    cancel_qrcode_login,
+    start_collection,
+    get_task_status,
+    cancel_task,
+)
+
+
+def _register_experimental_collection_tools() -> None:
+    config = load_config()
+    if not config.enable_experimental_collection:
+        return
+    for tool in EXPERIMENTAL_COLLECTION_TOOLS:
+        mcp.tool()(tool)
+
+
+_register_experimental_collection_tools()
 
 
 if __name__ == "__main__":

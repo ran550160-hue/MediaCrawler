@@ -1,3 +1,5 @@
+> 2026-07 状态说明：本文主要记录 Hermes stdio MCP 配置方式，仍然有效。默认 MediaCrawler MCP 只启用 `dataset` profile；`start_collection`、QR、login、cookie 相关工具必须显式启用 `experimental_collection` profile 才会注册。最新主线是桌面真实浏览器采集后，通过 MCP 登记、查询和分析数据集。详见 [桌面采集与数据集 MCP 架构改造方案](桌面采集与数据集MCP架构改造方案.md)。
+
 已在当前 Hermes 服务器上确认过了，这一项结论如下。
 1. MCP Python SDK 已安装
 服务器上的 Hermes Python 环境里已经有 MCP SDK：
@@ -78,6 +80,12 @@ mcp_servers:
 
     connect_timeout: 60
 
+    env:
+
+      MEDIACRAWLER_MCP_TOOL_PROFILE: dataset
+
+      MEDIACRAWLER_MCP_ENABLE_EXPERIMENTAL_COLLECTION: "false"
+
 或者用 CLI 添加：
 hermes mcp add mediacrawler \
 
@@ -118,29 +126,9 @@ def create_dataset(
 
 @mcp.tool()
 
-def start_collection(
+def register_dataset(dataset_dir: str, import_mode: str = "copy") -> dict:
 
-    dataset_id: str,
-
-    crawl_comments: bool = True,
-
-    max_items: int = 50,
-
-    max_comments_per_item: int = 100,
-
-) -> dict:
-
-    """Start an async collection task."""
-
-    ...
-
-
-
-@mcp.tool()
-
-def get_task_status(task_id: str) -> dict:
-
-    """Get collection task status."""
+    """Register a desktop-collected dataset bundle."""
 
     ...
 
@@ -237,10 +225,27 @@ Start a new session to use these tools.
 或者重启 Hermes gateway，让新 MCP tools 被发现并注入。
 工具命名会变成类似：
 mcp_mediacrawler_create_dataset
-mcp_mediacrawler_start_collection
-mcp_mediacrawler_get_task_status
+mcp_mediacrawler_register_dataset
+mcp_mediacrawler_query_dataset
 也就是：
 mcp_{server_name}_{tool_name}
+
+默认配置下不应该出现：
+
+```text
+mcp_mediacrawler_start_collection
+mcp_mediacrawler_get_task_status
+mcp_mediacrawler_start_qrcode_login
+mcp_mediacrawler_import_cookies
+```
+
+如果确实要调试服务器采集，需要显式启用：
+
+```yaml
+env:
+  MEDIACRAWLER_MCP_TOOL_PROFILE: dataset
+  MEDIACRAWLER_MCP_ENABLE_EXPERIMENTAL_COLLECTION: "true"
+```
 最终确认结论
 这一项已经确认清楚：
 当前服务器 已安装 MCP Python SDK 1.26.0。
