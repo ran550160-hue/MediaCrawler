@@ -41,6 +41,10 @@ _apply_cli_profile_overrides(sys.argv[1:])
 
 mcp = FastMCP("mediacrawler")
 
+LoginManager: Any = None
+QRCodeLoginManager: Any = None
+TaskManager: Any = None
+
 
 def _service() -> DatasetService:
     config = load_config()
@@ -60,6 +64,33 @@ def _importer() -> DatasetImporter:
     setup_file_logging(config.server_log_path)
     storage = Storage(config)
     return DatasetImporter(config, storage)
+
+
+def _login_manager_class() -> Any:
+    global LoginManager
+    if LoginManager is None:
+        from mediacrawler_mcp.login_manager import LoginManager as _LoginManager  # noqa: PLC0415
+
+        LoginManager = _LoginManager
+    return LoginManager
+
+
+def _qrcode_login_manager_class() -> Any:
+    global QRCodeLoginManager
+    if QRCodeLoginManager is None:
+        from mediacrawler_mcp.qrcode_login import QRCodeLoginManager as _QRCodeLoginManager  # noqa: PLC0415
+
+        QRCodeLoginManager = _QRCodeLoginManager
+    return QRCodeLoginManager
+
+
+def _task_manager_class() -> Any:
+    global TaskManager
+    if TaskManager is None:
+        from mediacrawler_mcp.task_manager import TaskManager as _TaskManager  # noqa: PLC0415
+
+        TaskManager = _TaskManager
+    return TaskManager
 
 
 @mcp.tool()
@@ -276,7 +307,7 @@ def get_login_status(
 ) -> dict[str, Any]:
     """Get local login status for a platform account."""
     try:
-        return LoginManager(_storage()).get_login_status(
+        return _login_manager_class()(_storage()).get_login_status(
             platform=platform,
             account_name=account_name,
             verify_remote=verify_remote,
@@ -296,7 +327,7 @@ def import_cookies(
 ) -> dict[str, Any]:
     """Import an XHS cookie string for later collection tasks."""
     try:
-        return LoginManager(_storage()).import_cookies(
+        return _login_manager_class()(_storage()).import_cookies(
             platform=platform,
             cookie_string=cookie_string,
             account_name=account_name,
@@ -317,7 +348,7 @@ def start_qrcode_login(
 ) -> dict[str, Any]:
     """Start an XHS QR-code login task and return a QR image path for Feishu."""
     try:
-        return QRCodeLoginManager(_storage()).start_qrcode_login(
+        return _qrcode_login_manager_class()(_storage()).start_qrcode_login(
             platform=platform,
             account_name=account_name,
             timeout_seconds=timeout_seconds,
@@ -334,7 +365,7 @@ def start_qrcode_login(
 def get_qrcode_login_status(login_task_id: str) -> dict[str, Any]:
     """Get QR-code login task status."""
     try:
-        return QRCodeLoginManager(_storage()).get_qrcode_login_status(login_task_id)
+        return _qrcode_login_manager_class()(_storage()).get_qrcode_login_status(login_task_id)
     except McpAppError as exc:
         return exc.to_result()
     except Exception as exc:  # pragma: no cover - safety boundary for MCP tools
@@ -345,7 +376,7 @@ def get_qrcode_login_status(login_task_id: str) -> dict[str, Any]:
 def cancel_qrcode_login(login_task_id: str) -> dict[str, Any]:
     """Cancel an active QR-code login task."""
     try:
-        return QRCodeLoginManager(_storage()).cancel_qrcode_login(login_task_id)
+        return _qrcode_login_manager_class()(_storage()).cancel_qrcode_login(login_task_id)
     except McpAppError as exc:
         return exc.to_result()
     except Exception as exc:  # pragma: no cover - safety boundary for MCP tools
@@ -365,7 +396,7 @@ def start_collection(
 ) -> dict[str, Any]:
     """Start an async xhs collection task for a dataset."""
     try:
-        task = TaskManager(_storage()).start_collection(
+        task = _task_manager_class()(_storage()).start_collection(
             dataset_id=dataset_id,
             include_comments=include_comments,
             max_contents=max_contents,
@@ -386,7 +417,7 @@ def start_collection(
 def get_task_status(task_id: str) -> dict[str, Any]:
     """Get a MediaCrawler MCP task status."""
     try:
-        return success_result(task=TaskManager(_storage()).get_task_status(task_id))
+        return success_result(task=_task_manager_class()(_storage()).get_task_status(task_id))
     except McpAppError as exc:
         return exc.to_result()
     except Exception as exc:  # pragma: no cover - safety boundary for MCP tools
@@ -397,7 +428,7 @@ def get_task_status(task_id: str) -> dict[str, Any]:
 def cancel_task(task_id: str) -> dict[str, Any]:
     """Cancel a running MediaCrawler MCP task."""
     try:
-        return success_result(**TaskManager(_storage()).cancel_task(task_id))
+        return success_result(**_task_manager_class()(_storage()).cancel_task(task_id))
     except McpAppError as exc:
         return exc.to_result()
     except Exception as exc:  # pragma: no cover - safety boundary for MCP tools
@@ -421,9 +452,6 @@ def _register_experimental_collection_tools() -> None:
     config = load_config()
     if not config.enable_experimental_collection:
         return
-    from mediacrawler_mcp.login_manager import LoginManager  # noqa: PLC0415
-    from mediacrawler_mcp.qrcode_login import QRCodeLoginManager  # noqa: PLC0415
-    from mediacrawler_mcp.task_manager import TaskManager  # noqa: PLC0415
     for tool in EXPERIMENTAL_COLLECTION_TOOLS:
         mcp.tool()(tool)
 
