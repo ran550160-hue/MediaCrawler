@@ -181,3 +181,4 @@ debug_tools
 database/*.db
 .omx/
 .codegraph/
+.tmp/

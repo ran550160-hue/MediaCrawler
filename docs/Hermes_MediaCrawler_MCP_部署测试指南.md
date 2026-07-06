@@ -203,9 +203,62 @@ mcp_servers:
     connect_timeout: 60
 ```
 
-## 6. Hermes 侧测试流程
+## 6. 一键 Smoke 验收
 
-### 6.1 工具可见性检查
+正式让 Hermes 会话调用工具前，建议先在 WSL 或 Hermes 机器上跑脚本验收：
+
+```bash
+uv run python scripts/hermes_mcp_smoke.py \
+  --home /tmp/mediacrawler-mcp-smoke
+```
+
+该脚本不会登录小红书，不会启动 Playwright，只验证 dataset profile 主链路：
+
+```text
+validate_dataset_bundle / register_dataset
+  -> normalize_dataset
+  -> query_dataset
+  -> generate_report / get_report
+```
+
+成功时应看到：
+
+```json
+{
+  "status": "success",
+  "profile": {
+    "experimental_tools_hidden": true
+  },
+  "counts": {
+    "contents": 2,
+    "comments": 3,
+    "query_results": 3
+  }
+}
+```
+
+用真实桌面 bundle 验收：
+
+```bash
+uv run python scripts/hermes_mcp_smoke.py \
+  --home /tmp/mediacrawler-mcp-real-bundle \
+  --dataset-dir /data/mediacrawler-inbox/<dataset_id>
+```
+
+只有 raw JSONL 文件时，可验证 `import_raw_files` 路径：
+
+```bash
+uv run python scripts/hermes_mcp_smoke.py \
+  --home /tmp/mediacrawler-mcp-raw \
+  --contents /data/mediacrawler-raw/search_contents_YYYY-MM-DD.jsonl \
+  --comments /data/mediacrawler-raw/search_comments_YYYY-MM-DD.jsonl
+```
+
+详细说明见 [Hermes WSL Smoke Test 指南](Hermes_MediaCrawler_MCP_WSL_Smoke_Test.md)。
+
+## 7. Hermes 侧手工测试流程
+
+### 7.1 工具可见性检查
 
 默认应可见：
 
@@ -239,7 +292,7 @@ cancel_task
 
 如果实验工具可见，说明误启用了 `experimental_collection`，需要检查 Hermes env 或启动参数。
 
-### 6.2 数据集登记
+### 7.2 数据集登记
 
 先校验 bundle：
 
@@ -266,7 +319,7 @@ register_dataset("/data/mediacrawler-inbox/<dataset_id>", "copy")
 
 记录返回的 `dataset_id`。
 
-### 6.3 标准化和查询
+### 7.3 标准化和查询
 
 标准化：
 
@@ -297,7 +350,7 @@ query_dataset("<dataset_id>", "风险", "comments", "xhs", null, 10, "like_count
 query_dataset("<dataset_id>", "AI", "contents", "xhs", null, 10, "engagement_count")
 ```
 
-### 6.4 生成报告
+### 7.4 生成报告
 
 ```text
 generate_report("<dataset_id>", "topic_research", 20)
@@ -314,9 +367,9 @@ reports/summary.json
 
 Hermes/飞书回复中可以引用报告路径或读取摘要内容。
 
-## 7. 常见问题
+## 8. 常见问题
 
-### 7.1 Chrome CDP 端口打不开
+### 8.1 Chrome CDP 端口打不开
 
 检查：
 
@@ -325,7 +378,7 @@ Hermes/飞书回复中可以引用报告路径或读取摘要内容。
 - 是否端口被占用。
 - `Invoke-RestMethod http://127.0.0.1:9222/json/version` 是否能返回 JSON。
 
-### 7.2 采集文件为空
+### 8.2 采集文件为空
 
 检查：
 
@@ -335,7 +388,7 @@ Hermes/飞书回复中可以引用报告路径或读取摘要内容。
 - `--crawler_max_notes_count` 是否过小。
 - 控制台日志是否出现登录失效或接口失败。
 
-### 7.3 Bundle 校验失败
+### 8.3 Bundle 校验失败
 
 常见原因：
 
@@ -344,7 +397,7 @@ Hermes/飞书回复中可以引用报告路径或读取摘要内容。
 - `raw/xhs_contents.jsonl` 和 `raw/xhs_comments.jsonl` 缺失。
 - JSONL 文件被手工编辑后格式损坏。
 
-### 7.4 Hermes 看到了 QR/login/start_collection 工具
+### 8.4 Hermes 看到了 QR/login/start_collection 工具
 
 这不是默认主链路。检查：
 
@@ -366,7 +419,7 @@ false
 --enable-experimental-collection
 ```
 
-### 7.5 Redis 连接失败
+### 8.5 Redis 连接失败
 
 对本 MCP dataset 测试可忽略。Redis 只影响原项目的 Redis cache 和动态代理池测试，不影响：
 
@@ -375,7 +428,7 @@ false
 - `query_dataset`
 - `generate_report`
 
-## 8. 推荐验收口径
+## 9. 推荐验收口径
 
 一次部署测试通过的标准：
 

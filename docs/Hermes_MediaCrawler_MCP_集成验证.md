@@ -82,10 +82,11 @@ uv run python scripts/hermes_mcp_smoke.py
 该脚本不会触发真实爬虫，不需要小红书登录。它会：
 
 - 使用临时 `MEDIACRAWLER_MCP_HOME`。
-- 调用 MCP tool 函数创建数据集。
-- 写入小型 fixture raw JSONL。
+- 检查默认 `dataset` profile 下实验采集工具不可见。
+- 自动生成小型 fixture dataset bundle。
+- 调用 `validate_dataset_bundle` 和 `register_dataset` 导入 bundle。
 - 调用 `normalize_dataset` 写入 DuckDB。
-- 调用 `query_dataset` 查询评论。
+- 调用 `query_dataset` 查询数据。
 - 调用 `generate_report` 和 `get_report` 生成并读取报告。
 
 成功时输出类似：
@@ -93,9 +94,12 @@ uv run python scripts/hermes_mcp_smoke.py
 ```json
 {
   "status": "success",
+  "mode": "fixture_bundle",
   "dataset_id": "ds_...",
+  "profile": {
+    "experimental_tools_hidden": true
+  },
   "tool_name_hint": [
-    "mcp_mediacrawler_create_dataset",
     "mcp_mediacrawler_register_dataset",
     "mcp_mediacrawler_validate_dataset_bundle",
     "mcp_mediacrawler_import_raw_files",
@@ -116,6 +120,25 @@ uv run python scripts/hermes_mcp_smoke.py
 ```bash
 uv run python scripts/hermes_mcp_smoke.py --home /tmp/mediacrawler-mcp-smoke
 ```
+
+验证桌面导出的真实 bundle：
+
+```bash
+uv run python scripts/hermes_mcp_smoke.py \
+  --home /tmp/mediacrawler-mcp-real-bundle \
+  --dataset-dir /data/mediacrawler-inbox/<dataset_id>
+```
+
+验证 raw JSONL 导入路径：
+
+```bash
+uv run python scripts/hermes_mcp_smoke.py \
+  --home /tmp/mediacrawler-mcp-raw \
+  --contents /data/mediacrawler-raw/search_contents_YYYY-MM-DD.jsonl \
+  --comments /data/mediacrawler-raw/search_comments_YYYY-MM-DD.jsonl
+```
+
+完整用法见 [Hermes WSL Smoke Test 指南](Hermes_MediaCrawler_MCP_WSL_Smoke_Test.md)。
 
 ## 5. Hermes 会话内工具验证
 
