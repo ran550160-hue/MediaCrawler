@@ -111,12 +111,13 @@ class QueryEngine:
             where.append(f"{text_expr} LIKE ?")
             params.append(f"%{token}%")
 
+        order_expr = "publish_datetime" if sort_by == "publish_time" else sort_by
         params.append(limit)
         sql = f"""
             SELECT {select}
             FROM {target}
             WHERE {" AND ".join(where)}
-            ORDER BY {sort_by} DESC
+            ORDER BY {order_expr} DESC NULLS LAST
             LIMIT ?
         """
         return sql, params

@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+import duckdb
+
 from mediacrawler_mcp.config import McpConfig
 from mediacrawler_mcp.dataset_importer import DatasetImporter
 from mediacrawler_mcp.dataset_service import DatasetService
@@ -125,6 +127,76 @@ def test_registered_bundle_can_be_normalized(tmp_path):
     assert summary["content_count"] == 1
     assert summary["comment_count"] == 2
     assert Path(summary["duckdb_path"]).exists()
+
+
+def test_normalizer_backfills_comment_keyword_adds_timestamp_and_flattens_sub_comments(tmp_path):
+    importer, storage = _importer(tmp_path)
+    bundle = tmp_path / "inbox" / "rich_ds"
+    (bundle / "raw").mkdir(parents=True)
+    (bundle / "dataset.json").write_text(
+        json.dumps(
+            {
+                "dataset_id": "rich_ds",
+                "name": "Rich Dataset",
+                "platforms": ["xhs"],
+                "keywords": ["ai coding"],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    _write_jsonl(
+        bundle / "raw" / "xhs_contents.jsonl",
+        [
+            {
+                "note_id": "n1",
+                "title": "first",
+                "desc": "content",
+                "source_keyword": "ai coding",
+                "time": 1700000000000,
+            }
+        ],
+    )
+    _write_jsonl(
+        bundle / "raw" / "xhs_comments.jsonl",
+        [
+            {
+                "note_id": "n1",
+                "comment_id": "c1",
+                "content": "parent",
+                "create_time": 1700000001000,
+                "sub_comments": [
+                    {
+                        "comment_id": "c1_1",
+                        "content": "child",
+                        "create_time": 1700000002000,
+                    }
+                ],
+            }
+        ],
+    )
+    importer.register_dataset(str(bundle), import_mode="copy")
+
+    summary = DatasetNormalizer(storage).normalize_dataset("rich_ds", force=True)
+
+    assert summary["comment_count"] == 2
+    with duckdb.connect(summary["duckdb_path"], read_only=True) as conn:
+        comments = conn.execute(
+            """
+            SELECT comment_id, parent_comment_id, source_keyword, publish_datetime
+            FROM comments
+            ORDER BY comment_id
+            """
+        ).fetchall()
+        content_datetime = conn.execute("SELECT publish_datetime FROM contents WHERE content_id = 'n1'").fetchone()[0]
+
+    assert comments[0][0] == "c1"
+    assert comments[0][2] == "ai coding"
+    assert comments[0][3].year == 2023
+    assert comments[1][0] == "c1_1"
+    assert comments[1][1] == "c1"
+    assert comments[1][2] == "ai coding"
+    assert content_datetime.year == 2023
 
 
 def test_import_raw_files_copies_into_existing_dataset_and_syncs_manifest(tmp_path):
