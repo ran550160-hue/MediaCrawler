@@ -118,6 +118,8 @@ def test_generate_report_writes_markdown_html_summary_and_report_row(tmp_path):
     assert summary["keyword_distribution"] == {"程序员接单": 1, "AI编程副业": 1}
     assert summary["top_contents"][0]["content_id"] == "n1"
     assert summary["top_comments"][0]["comment_id"] == "c1"
+    assert "最怕客户不付款" not in summary["comment_word_freq"]
+    assert {"客户", "付款"} & set(summary["comment_word_freq"])
     assert summary["ad_candidates"][0]["content_id"] == "n1"
 
     fetched = report_service.get_report(dataset.dataset_id)

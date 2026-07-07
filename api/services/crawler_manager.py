@@ -35,6 +35,8 @@ class CrawlerManager:
         self.process: Optional[subprocess.Popen] = None
         self.status = "idle"
         self.started_at: Optional[datetime] = None
+        self.completed_at: Optional[datetime] = None
+        self.last_exit_code: Optional[int] = None
         self.current_config: Optional[CrawlerStartRequest] = None
         self._log_id = 0
         self._logs: List[LogEntry] = []
@@ -99,6 +101,8 @@ class CrawlerManager:
             # Clear old logs
             self._logs = []
             self._log_id = 0
+            self.completed_at = None
+            self.last_exit_code = None
 
             # Clear pending queue (don't replace object to avoid WebSocket broadcast coroutine holding old queue reference)
             if self._log_queue is None:
@@ -175,6 +179,8 @@ class CrawlerManager:
                     await self._push_log(entry)
                     self.process.kill()
 
+                self.last_exit_code = self.process.poll()
+                self.completed_at = datetime.now()
                 entry = self._create_log_entry("Crawler process terminated", "info")
                 await self._push_log(entry)
 
@@ -199,6 +205,8 @@ class CrawlerManager:
             "platform": self.current_config.platform.value if self.current_config else None,
             "crawler_type": self.current_config.crawler_type.value if self.current_config else None,
             "started_at": self.started_at.isoformat() if self.started_at else None,
+            "completed_at": self.completed_at.isoformat() if self.completed_at else None,
+            "exit_code": self.last_exit_code,
             "error_message": None
         }
 
@@ -234,7 +242,18 @@ class CrawlerManager:
         if config.cookies:
             cmd.extend(["--cookies", config.cookies])
 
+        cmd.extend(["--enable_cdp_mode", "true" if config.enable_cdp_mode else "false"])
+        cmd.extend(["--cdp_connect_existing", "true" if config.cdp_connect_existing else "false"])
+        cmd.extend(["--cdp_debug_port", str(config.cdp_debug_port)])
         cmd.extend(["--headless", "true" if config.headless else "false"])
+        cmd.extend(["--enable_ip_proxy", "true" if config.enable_ip_proxy else "false"])
+        cmd.extend(["--ip_proxy_provider_name", config.ip_proxy_provider_name])
+
+        if config.save_data_path:
+            cmd.extend(["--save_data_path", config.save_data_path])
+
+        if config.static_proxy_url:
+            cmd.extend(["--static_proxy_url", config.static_proxy_url])
 
         return cmd
 
@@ -270,6 +289,8 @@ class CrawlerManager:
             # Process ended
             if self.status == "running":
                 exit_code = self.process.returncode if self.process else -1
+                self.last_exit_code = exit_code
+                self.completed_at = datetime.now()
                 if exit_code == 0:
                     entry = self._create_log_entry("Crawler completed successfully", "success")
                 else:

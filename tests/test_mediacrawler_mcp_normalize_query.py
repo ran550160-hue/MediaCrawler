@@ -186,6 +186,22 @@ def test_query_dataset_filters_comments_by_query_keyword_and_sort(tmp_path):
     assert results[0]["source_keyword"] == "AI编程副业"
 
 
+def test_query_dataset_supports_offset_pagination(tmp_path):
+    dataset, normalizer, query_engine = _dataset_with_raw(tmp_path)
+    normalizer.normalize_dataset(dataset.dataset_id)
+
+    results = query_engine.query_dataset(
+        dataset_id=dataset.dataset_id,
+        target="comments",
+        query="",
+        limit=1,
+        offset=1,
+    )
+
+    assert len(results) == 1
+    assert results[0]["comment_id"] == "c2"
+
+
 def test_query_dataset_can_query_contents(tmp_path):
     dataset, normalizer, query_engine = _dataset_with_raw(tmp_path)
     normalizer.normalize_dataset(dataset.dataset_id)

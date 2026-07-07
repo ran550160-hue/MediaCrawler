@@ -76,6 +76,58 @@ class CrawlerStartRequest(BaseModel):
     headless: bool = False
     max_notes_count: Optional[int] = Field(default=None, ge=1, le=MAX_API_LIMIT_COUNT)
     max_comments_count: Optional[int] = Field(default=None, ge=1, le=MAX_API_LIMIT_COUNT)
+    enable_cdp_mode: bool = True
+    cdp_connect_existing: bool = True
+    cdp_debug_port: int = Field(default=9222, ge=1, le=65535)
+    save_data_path: str = ""
+    enable_ip_proxy: bool = False
+    ip_proxy_provider_name: str = "kuaidaili"
+    static_proxy_url: str = ""
+
+
+class DatasetExportRequest(BaseModel):
+    """Dataset bundle export request"""
+    name: str
+    keywords: list[str]
+    description: Optional[str] = None
+    platform: PlatformEnum = PlatformEnum.XHS
+    crawler_type: CrawlerTypeEnum = CrawlerTypeEnum.SEARCH
+    data_root: str = "data"
+    output_dir: str = "datasets"
+    contents_path: Optional[str] = None
+    comments_path: Optional[str] = None
+    dataset_id: Optional[str] = None
+
+
+class CDPBrowserStartRequest(BaseModel):
+    """CDP browser start request"""
+    port: int = Field(default=9222, ge=1, le=65535)
+    headless: bool = False
+    browser_path: str = ""
+    user_data_dir: str = ""
+    timeout_seconds: int = Field(default=30, ge=1, le=300)
+
+
+class AgentXHSSearchRequest(BaseModel):
+    """Restricted local-agent XHS search request"""
+    keywords: list[str]
+    max_contents: int = Field(default=20, ge=1, le=200)
+    max_comments_per_content: int = Field(default=10, ge=0, le=200)
+    include_comments: bool = True
+    include_sub_comments: bool = False
+    start_page: int = Field(default=1, ge=1, le=100)
+    cdp_debug_port: int = Field(default=9222, ge=1, le=65535)
+    headless: bool = False
+    dataset_name: str = ""
+    description: str = ""
+
+
+class AgentTaskFinalizeRequest(BaseModel):
+    """Finalize a local-agent task into a dataset bundle"""
+    dataset_name: str = ""
+    description: str = ""
+    output_dir: str = "datasets"
+    dataset_id: Optional[str] = None
 
 
 class CrawlerStatusResponse(BaseModel):

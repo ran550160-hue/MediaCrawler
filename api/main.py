@@ -23,15 +23,18 @@ Or: python -m api.main
 """
 import asyncio
 import os
-import sys
 import subprocess
+import socket
+from pathlib import Path
 import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 
-from .routers import crawler_router, data_router, websocket_router
+import config
+
+from .routers import agent_router, browser_router, crawler_router, data_router, datasets_router, websocket_router
 
 app = FastAPI(
     title="MediaCrawler WebUI API",
@@ -41,6 +44,52 @@ app = FastAPI(
 
 # Get webui static files directory
 WEBUI_DIR = os.path.join(os.path.dirname(__file__), "webui")
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _check_result(name: str, status: str, message: str, detail: str | None = None) -> dict:
+    result = {"name": name, "status": status, "message": message}
+    if detail:
+        result["detail"] = detail
+    return result
+
+
+async def _run_command(command: list[str], timeout: float = 10.0) -> subprocess.CompletedProcess:
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        None,
+        lambda: subprocess.run(
+            command,
+            capture_output=True,
+            timeout=timeout,
+            cwd=str(REPO_ROOT),
+        ),
+    )
+
+
+def _decode_output(value: bytes | str | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="ignore")
+    return value
+
+
+def _check_cdp_port(port: int) -> dict:
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=0.5):
+            return _check_result(
+                "chrome_cdp",
+                "ok",
+                f"Chrome CDP port {port} is reachable",
+            )
+    except OSError as exc:
+        return _check_result(
+            "chrome_cdp",
+            "warning",
+            f"Chrome CDP port {port} is not reachable",
+            str(exc),
+        )
 
 # CORS configuration - allow frontend dev server access
 app.add_middleware(
@@ -57,8 +106,11 @@ app.add_middleware(
 )
 
 # Register routers
+app.include_router(agent_router, prefix="/api")
+app.include_router(browser_router, prefix="/api")
 app.include_router(crawler_router, prefix="/api")
 app.include_router(data_router, prefix="/api")
+app.include_router(datasets_router, prefix="/api")
 app.include_router(websocket_router, prefix="/api")
 
 
@@ -82,64 +134,116 @@ async def health_check():
 
 
 @app.get("/api/env/check")
-async def check_environment():
+async def check_environment(cdp_port: int | None = None):
     """Check if MediaCrawler environment is configured correctly"""
+    checks = []
+    help_output = ""
+
     try:
-        # Run uv run main.py --help command to check environment
-        if sys.platform == "win32":
-            loop = asyncio.get_running_loop()
-            process = await loop.run_in_executor(
-                None,
-                lambda: subprocess.run(
-                    ["uv", "run", "main.py", "--help"],
-                    capture_output=True,
-                    timeout=30.0,
-                    cwd="."
+        uv_process = await _run_command(["uv", "--version"], timeout=10.0)
+        uv_output = _decode_output(uv_process.stdout or uv_process.stderr).strip()
+        if uv_process.returncode == 0:
+            checks.append(_check_result("uv", "ok", "uv is available", uv_output[:200]))
+        else:
+            checks.append(_check_result("uv", "error", "uv command failed", uv_output[:500]))
+    except FileNotFoundError:
+        checks.append(
+            _check_result(
+                "uv",
+                "error",
+                "uv command not found",
+                "Please ensure uv is installed and configured in system PATH",
+            )
+        )
+    except subprocess.TimeoutExpired:
+        checks.append(_check_result("uv", "error", "uv check timed out"))
+    except Exception as exc:
+        checks.append(_check_result("uv", "error", "uv check failed", f"{type(exc).__name__}: {exc}"))
+
+    if checks[-1]["name"] == "uv" and checks[-1]["status"] == "ok":
+        try:
+            help_process = await _run_command(["uv", "run", "main.py", "--help"], timeout=30.0)
+            stdout = _decode_output(help_process.stdout)
+            stderr = _decode_output(help_process.stderr)
+            help_output = stdout[:500]
+            if help_process.returncode == 0:
+                checks.append(
+                    _check_result(
+                        "mediacrawler",
+                        "ok",
+                        "MediaCrawler CLI is available",
+                        stdout[:200],
+                    )
+                )
+            else:
+                checks.append(
+                    _check_result(
+                        "mediacrawler",
+                        "error",
+                        "MediaCrawler CLI check failed",
+                        (stderr or stdout)[:500],
+                    )
+                )
+        except subprocess.TimeoutExpired:
+            checks.append(_check_result("mediacrawler", "error", "MediaCrawler CLI check timed out"))
+        except Exception as exc:
+            checks.append(
+                _check_result(
+                    "mediacrawler",
+                    "error",
+                    "MediaCrawler CLI check failed",
+                    f"{type(exc).__name__}: {exc}",
                 )
             )
-            stdout, stderr = process.stdout, process.stderr  # bytes
+
+    try:
+        node_process = await _run_command(["node", "--version"], timeout=10.0)
+        node_output = _decode_output(node_process.stdout or node_process.stderr).strip()
+        if node_process.returncode == 0:
+            checks.append(_check_result("node", "ok", "Node.js is available", node_output[:200]))
         else:
-            process = await asyncio.create_subprocess_exec(
-                "uv", "run", "main.py", "--help",
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                cwd="."  # Project root directory
-            )
-            stdout, stderr = await asyncio.wait_for(
-                process.communicate(),
-                timeout=30.0  # 30 seconds timeout
-            )
-        if process.returncode == 0:
-            return {
-                "success": True,
-                "message": "MediaCrawler environment configured correctly",
-                "output": stdout.decode("utf-8", errors="ignore")[:500]  # Truncate to first 500 characters
-            }
-        else:
-            error_msg = stderr.decode("utf-8", errors="ignore") or stdout.decode("utf-8", errors="ignore")
-            return {
-                "success": False,
-                "message": "Environment check failed",
-                "error": error_msg[:500]
-            }
-    except asyncio.TimeoutError:
-        return {
-            "success": False,
-            "message": "Environment check timeout",
-            "error": "Command execution exceeded 30 seconds"
-        }
+            checks.append(_check_result("node", "warning", "Node.js command failed", node_output[:500]))
     except FileNotFoundError:
-        return {
-            "success": False,
-            "message": "uv command not found",
-            "error": "Please ensure uv is installed and configured in system PATH"
-        }
-    except Exception as e:
-        return {
-            "success": False,
-            "message": "Environment check error",
-            "error": f"{type(e).__name__}: {str(e) or 'Unknown'}"
-        }
+        checks.append(
+            _check_result(
+                "node",
+                "warning",
+                "Node.js command not found",
+                "Douyin and Zhihu crawling may require Node.js >= 16",
+            )
+        )
+    except subprocess.TimeoutExpired:
+        checks.append(_check_result("node", "warning", "Node.js check timed out"))
+    except Exception as exc:
+        checks.append(_check_result("node", "warning", "Node.js check failed", f"{type(exc).__name__}: {exc}"))
+
+    checks.append(_check_cdp_port(cdp_port or config.CDP_DEBUG_PORT))
+
+    data_dir = REPO_ROOT / "data"
+    if data_dir.exists():
+        checks.append(_check_result("data_dir", "ok", "Data directory exists", str(data_dir)))
+    else:
+        checks.append(_check_result("data_dir", "warning", "Data directory does not exist yet", str(data_dir)))
+
+    webui_dir = Path(WEBUI_DIR)
+    if (webui_dir / "index.html").exists():
+        checks.append(_check_result("webui", "ok", "WebUI static files are available", str(webui_dir)))
+    else:
+        checks.append(_check_result("webui", "error", "WebUI index.html is missing", str(webui_dir)))
+
+    success = all(check["status"] != "error" for check in checks)
+    response = {
+        "success": success,
+        "message": "MediaCrawler environment configured correctly" if success else "Environment check failed",
+        "checks": checks,
+    }
+    if help_output:
+        response["output"] = help_output
+    if not success:
+        first_error = next((check for check in checks if check["status"] == "error"), None)
+        if first_error:
+            response["error"] = first_error.get("detail") or first_error["message"]
+    return response
 
 
 @app.get("/api/config/platforms")

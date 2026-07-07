@@ -18,6 +18,16 @@ EXPERIMENTAL_TOOL_NAMES = {
     "cancel_task",
 }
 
+DESKTOP_AGENT_TOOL_NAMES = {
+    "check_local_workbench",
+    "ensure_cdp_browser",
+    "start_local_xhs_search",
+    "get_local_xhs_search_status",
+    "cancel_local_xhs_search",
+    "retry_local_xhs_search",
+    "finalize_local_xhs_search",
+}
+
 
 def _tool_names(server_module=server) -> set[str]:
     return {tool.name for tool in asyncio.run(server_module.mcp.list_tools())}
@@ -44,6 +54,21 @@ def test_default_dataset_profile_hides_experimental_collection_tools(monkeypatch
         "get_report",
     }.issubset(names)
     assert EXPERIMENTAL_TOOL_NAMES.isdisjoint(names)
+    assert DESKTOP_AGENT_TOOL_NAMES.isdisjoint(names)
+
+
+def test_desktop_agent_profile_exposes_local_tools_without_experimental_tools(monkeypatch):
+    monkeypatch.setenv("MEDIACRAWLER_MCP_TOOL_PROFILE", "desktop_agent")
+    monkeypatch.delenv("MEDIACRAWLER_MCP_ENABLE_EXPERIMENTAL_COLLECTION", raising=False)
+    server_module = importlib.reload(server)
+
+    names = _tool_names(server_module)
+
+    assert DESKTOP_AGENT_TOOL_NAMES.issubset(names)
+    assert EXPERIMENTAL_TOOL_NAMES.isdisjoint(names)
+
+    monkeypatch.setenv("MEDIACRAWLER_MCP_TOOL_PROFILE", "dataset")
+    importlib.reload(server)
 
 
 def test_experimental_collection_tools_require_explicit_enable(monkeypatch):

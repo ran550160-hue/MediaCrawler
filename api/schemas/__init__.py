@@ -22,6 +22,10 @@ from .crawler import (
     CrawlerTypeEnum,
     SaveDataOptionEnum,
     CrawlerStartRequest,
+    DatasetExportRequest,
+    CDPBrowserStartRequest,
+    AgentXHSSearchRequest,
+    AgentTaskFinalizeRequest,
     CrawlerStatusResponse,
     LogEntry,
 )
@@ -32,6 +36,10 @@ __all__ = [
     "CrawlerTypeEnum",
     "SaveDataOptionEnum",
     "CrawlerStartRequest",
+    "DatasetExportRequest",
+    "CDPBrowserStartRequest",
+    "AgentXHSSearchRequest",
+    "AgentTaskFinalizeRequest",
     "CrawlerStatusResponse",
     "LogEntry",
 ]

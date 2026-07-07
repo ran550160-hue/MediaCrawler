@@ -28,6 +28,20 @@ router = APIRouter(prefix="/data", tags=["data"])
 
 # Data directory
 DATA_DIR = Path(__file__).parent.parent.parent / "data"
+SUPPORTED_EXTENSIONS = {".json", ".jsonl", ".csv", ".xlsx", ".xls"}
+
+
+def _count_jsonl_records(file_path: Path) -> int:
+    with open(file_path, "r", encoding="utf-8") as f:
+        return sum(1 for line in f if line.strip())
+
+
+def _matches_file_type(file_path: Path, file_type: str) -> bool:
+    normalized = file_type.strip().lower()
+    suffix = file_path.suffix[1:].lower()
+    if normalized == "excel":
+        return suffix in {"xlsx", "xls"}
+    return suffix == normalized
 
 
 def get_file_info(file_path: Path) -> dict:
@@ -42,9 +56,11 @@ def get_file_info(file_path: Path) -> dict:
                 data = json.load(f)
                 if isinstance(data, list):
                     record_count = len(data)
+        elif file_path.suffix == ".jsonl":
+            record_count = _count_jsonl_records(file_path)
         elif file_path.suffix == ".csv":
             with open(file_path, "r", encoding="utf-8") as f:
-                record_count = sum(1 for _ in f) - 1  # Subtract header row
+                record_count = max(sum(1 for _ in f) - 1, 0)  # Subtract header row
     except Exception:
         pass
 
@@ -65,13 +81,11 @@ async def list_data_files(platform: Optional[str] = None, file_type: Optional[st
         return {"files": []}
 
     files = []
-    supported_extensions = {".json", ".csv", ".xlsx", ".xls"}
-
     for root, dirs, filenames in os.walk(DATA_DIR):
         root_path = Path(root)
         for filename in filenames:
             file_path = root_path / filename
-            if file_path.suffix.lower() not in supported_extensions:
+            if file_path.suffix.lower() not in SUPPORTED_EXTENSIONS:
                 continue
 
             # Platform filter
@@ -81,7 +95,7 @@ async def list_data_files(platform: Optional[str] = None, file_type: Optional[st
                     continue
 
             # Type filter
-            if file_type and file_path.suffix[1:].lower() != file_type.lower():
+            if file_type and not _matches_file_type(file_path, file_type):
                 continue
 
             try:
@@ -121,6 +135,25 @@ async def get_file_content(file_path: str, preview: bool = True, limit: int = 10
                     if isinstance(data, list):
                         return {"data": data[:limit], "total": len(data)}
                     return {"data": data, "total": 1}
+            elif full_path.suffix == ".jsonl":
+                rows = []
+                total = 0
+                with open(full_path, "r", encoding="utf-8") as f:
+                    for line_number, line in enumerate(f, start=1):
+                        line = line.strip()
+                        if not line:
+                            continue
+                        total += 1
+                        try:
+                            row = json.loads(line)
+                        except json.JSONDecodeError as exc:
+                            raise HTTPException(
+                                status_code=400,
+                                detail=f"Invalid JSONL file at line {line_number}",
+                            ) from exc
+                        if len(rows) < limit:
+                            rows.append(row)
+                return {"data": rows, "total": total}
             elif full_path.suffix == ".csv":
                 import csv
                 with open(full_path, "r", encoding="utf-8") as f:
@@ -132,7 +165,7 @@ async def get_file_content(file_path: str, preview: bool = True, limit: int = 10
                         rows.append(row)
                     # Re-read to get total count
                     f.seek(0)
-                    total = sum(1 for _ in f) - 1
+                    total = max(sum(1 for _ in f) - 1, 0)
                     return {"data": rows, "total": total}
             elif full_path.suffix.lower() in (".xlsx", ".xls"):
                 import pandas as pd
@@ -150,6 +183,8 @@ async def get_file_content(file_path: str, preview: bool = True, limit: int = 10
                 }
             else:
                 raise HTTPException(status_code=400, detail="Unsupported file type for preview")
+        except HTTPException:
+            raise
         except json.JSONDecodeError:
             raise HTTPException(status_code=400, detail="Invalid JSON file")
         except Exception as e:
@@ -200,13 +235,11 @@ async def get_data_stats():
         "by_type": {}
     }
 
-    supported_extensions = {".json", ".csv", ".xlsx", ".xls"}
-
     for root, dirs, filenames in os.walk(DATA_DIR):
         root_path = Path(root)
         for filename in filenames:
             file_path = root_path / filename
-            if file_path.suffix.lower() not in supported_extensions:
+            if file_path.suffix.lower() not in SUPPORTED_EXTENSIONS:
                 continue
 
             try:

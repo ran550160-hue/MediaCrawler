@@ -2,16 +2,212 @@
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>MediaCrawler - Command Center</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-    <script type="module" crossorigin src="/assets/index-DvClRayq.js"></script>
-    <link rel="stylesheet" crossorigin href="/assets/index-OiBmsgXF.css">
+    <title>MediaCrawler 工作台</title>
+    <link rel="stylesheet" href="/static/app.css" />
   </head>
   <body>
-    <div id="root"></div>
+    <div class="shell">
+      <header class="topbar">
+        <div>
+          <h1>MediaCrawler 工作台</h1>
+          <p id="statusText">准备就绪</p>
+        </div>
+        <div class="top-actions">
+          <button id="refreshDataBtn" type="button">刷新数据</button>
+          <button id="checkEnvBtn" type="button">检查环境</button>
+        </div>
+      </header>
+
+      <main class="grid">
+        <section class="panel env-panel">
+          <div class="panel-head">
+            <h2>环境状态</h2>
+            <span id="envSummary" class="muted">未检查</span>
+          </div>
+          <div class="cdp-actions">
+            <button id="startCdpBtn" type="button">启动 CDP 浏览器</button>
+            <span id="cdpStatusText" class="muted">端口 9222</span>
+          </div>
+          <div class="agent-hint">
+            <strong>本地 Agent</strong>
+            <span id="agentBaseUrl">Hermes/WSL base URL: http://127.0.0.1:8080</span>
+            <code>MEDIACRAWLER_MCP_TOOL_PROFILE=desktop_agent</code>
+          </div>
+          <div id="envChecks" class="checks"></div>
+        </section>
+
+        <section class="panel config-panel">
+          <div class="panel-head">
+            <h2>任务配置</h2>
+            <span id="taskState" class="state-dot idle">idle</span>
+          </div>
+
+          <div class="segmented" role="tablist" aria-label="采集类型">
+            <button class="active" type="button" data-preset="search">关键词搜索</button>
+            <button type="button" data-preset="detail">指定内容</button>
+            <button type="button" data-preset="creator">创作者主页</button>
+          </div>
+
+          <form id="crawlerForm" class="form">
+            <div class="field-row">
+              <label>
+                平台
+                <select name="platform">
+                  <option value="xhs">小红书</option>
+                  <option value="dy">抖音</option>
+                  <option value="ks">快手</option>
+                  <option value="bili">B 站</option>
+                  <option value="wb">微博</option>
+                  <option value="tieba">贴吧</option>
+                  <option value="zhihu">知乎</option>
+                </select>
+              </label>
+              <label>
+                登录方式
+                <select name="login_type">
+                  <option value="qrcode">扫码</option>
+                  <option value="cookie">Cookie</option>
+                  <option value="phone">手机号</option>
+                </select>
+              </label>
+              <label>
+                保存格式
+                <select name="save_option">
+                  <option value="jsonl">JSONL</option>
+                  <option value="json">JSON</option>
+                  <option value="csv">CSV</option>
+                  <option value="excel">Excel</option>
+                  <option value="sqlite">SQLite</option>
+                </select>
+              </label>
+            </div>
+
+            <label class="input-block mode-field" data-mode="search">
+              关键词
+              <textarea name="keywords" rows="3" placeholder="多个关键词用英文逗号分隔">AI编程副业,程序员接单</textarea>
+            </label>
+            <label class="input-block mode-field hidden" data-mode="detail">
+              内容 ID 或 URL
+              <textarea name="specified_ids" rows="3" placeholder="多个 ID 或 URL 用英文逗号分隔"></textarea>
+            </label>
+            <label class="input-block mode-field hidden" data-mode="creator">
+              创作者 ID 或主页 URL
+              <textarea name="creator_ids" rows="3" placeholder="多个 ID 或 URL 用英文逗号分隔"></textarea>
+            </label>
+            <label class="input-block">
+              Cookie
+              <textarea name="cookies" rows="2" placeholder="仅 Cookie 登录需要填写"></textarea>
+            </label>
+
+            <div class="field-row compact">
+              <label>
+                起始页
+                <input name="start_page" type="number" min="1" value="1" />
+              </label>
+              <label>
+                内容数
+                <input name="max_notes_count" type="number" min="1" max="10000" value="20" />
+              </label>
+              <label>
+                单条评论数
+                <input name="max_comments_count" type="number" min="1" max="10000" value="10" />
+              </label>
+              <label>
+                CDP 端口
+                <input name="cdp_debug_port" type="number" min="1" max="65535" value="9222" />
+              </label>
+            </div>
+
+            <div class="toggles">
+              <label><input name="enable_comments" type="checkbox" checked /> 一级评论</label>
+              <label><input name="enable_sub_comments" type="checkbox" /> 二级评论</label>
+              <label><input name="headless" type="checkbox" /> 无头模式</label>
+              <label><input name="enable_cdp_mode" type="checkbox" checked /> CDP 模式</label>
+              <label><input name="cdp_connect_existing" type="checkbox" checked /> 连接已有浏览器</label>
+              <label><input name="enable_ip_proxy" type="checkbox" /> 代理</label>
+            </div>
+
+            <div class="field-row">
+              <label>
+                保存路径
+                <input name="save_data_path" type="text" placeholder="默认 data 目录" />
+              </label>
+              <label>
+                代理服务
+                <select name="ip_proxy_provider_name">
+                  <option value="kuaidaili">快代理</option>
+                  <option value="wandouhttp">豌豆 HTTP</option>
+                  <option value="static">静态代理</option>
+                </select>
+              </label>
+              <label>
+                静态代理
+                <input name="static_proxy_url" type="text" placeholder="http://user:password@host:port" />
+              </label>
+            </div>
+
+            <div class="form-actions">
+              <button id="startBtn" class="primary" type="submit">启动采集</button>
+              <button id="stopBtn" type="button">停止</button>
+            </div>
+          </form>
+        </section>
+
+        <section class="panel logs-panel">
+          <div class="panel-head">
+            <h2>实时日志</h2>
+            <button id="clearLogsBtn" type="button">清空</button>
+          </div>
+          <pre id="logStream" class="log-stream"></pre>
+        </section>
+
+        <section class="panel data-panel">
+          <div class="panel-head">
+            <h2>数据文件</h2>
+            <select id="fileTypeFilter" aria-label="文件类型">
+              <option value="">全部</option>
+              <option value="jsonl" selected>JSONL</option>
+              <option value="json">JSON</option>
+              <option value="csv">CSV</option>
+              <option value="excel">Excel</option>
+            </select>
+          </div>
+          <div class="data-layout">
+            <div id="fileList" class="file-list"></div>
+            <div class="preview">
+              <div class="preview-head">
+                <span id="previewTitle">未选择文件</span>
+                <a id="downloadLink" class="hidden" href="#">下载</a>
+              </div>
+              <div id="previewTable" class="table-wrap"></div>
+            </div>
+          </div>
+
+          <form id="exportForm" class="export-form">
+            <div class="field-row">
+              <label>
+                数据集名称
+                <input name="name" type="text" value="MediaCrawler 本地采集" />
+              </label>
+              <label>
+                数据集关键词
+                <input name="keywords" type="text" value="AI编程副业,程序员接单" />
+              </label>
+            </div>
+            <label class="input-block">
+              描述
+              <textarea name="description" rows="2" placeholder="可选"></textarea>
+            </label>
+            <div class="form-actions">
+              <button id="exportBtn" type="submit">整理为数据集</button>
+              <span id="exportResult" class="muted"></span>
+            </div>
+          </form>
+        </section>
+      </main>
+    </div>
+
+    <script src="/static/app.js"></script>
   </body>
 </html>

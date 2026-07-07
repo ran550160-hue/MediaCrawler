@@ -16,6 +16,7 @@ from mcp.server.fastmcp import FastMCP
 from mediacrawler_mcp.config import load_config
 from mediacrawler_mcp.dataset_importer import DatasetImporter
 from mediacrawler_mcp.dataset_service import DatasetService
+from mediacrawler_mcp.desktop_agent_client import DesktopAgentClient
 from mediacrawler_mcp.errors import ErrorCode, McpAppError, error_result, success_result
 from mediacrawler_mcp.normalizer import DatasetNormalizer
 from mediacrawler_mcp.query_engine import QueryEngine
@@ -30,7 +31,7 @@ def _apply_cli_profile_overrides(argv: list[str] | None = None) -> None:
     parser.add_argument("--enable-experimental-collection", action="store_true")
     args, _ = parser.parse_known_args(argv)
 
-    if args.profile in {"dataset", "experimental_collection"}:
+    if args.profile in {"dataset", "desktop_agent", "experimental_collection"}:
         os.environ["MEDIACRAWLER_MCP_TOOL_PROFILE"] = args.profile
     if args.enable_experimental_collection:
         os.environ["MEDIACRAWLER_MCP_ENABLE_EXPERIMENTAL_COLLECTION"] = "true"
@@ -244,6 +245,7 @@ def query_dataset(
     platform: str | None = None,
     source_keyword: str | None = None,
     limit: int = 20,
+    offset: int = 0,
     sort_by: str | None = None,
 ) -> dict[str, Any]:
     """Query an existing normalized MediaCrawler dataset."""
@@ -255,9 +257,10 @@ def query_dataset(
             platform=platform,
             source_keyword=source_keyword,
             limit=limit,
+            offset=offset,
             sort_by=sort_by,
         )
-        return success_result(results=results)
+        return success_result(results=results, limit=limit, offset=offset)
     except McpAppError as exc:
         return exc.to_result()
     except Exception as exc:  # pragma: no cover - safety boundary for MCP tools
@@ -448,6 +451,173 @@ EXPERIMENTAL_COLLECTION_TOOLS = (
 )
 
 
+def check_local_workbench(base_url: str = "http://127.0.0.1:8080") -> dict[str, Any]:
+    """Check the Windows MediaCrawler workbench reachable from Hermes/WSL."""
+    try:
+        client = DesktopAgentClient(base_url=base_url)
+        health = client.check_workbench()
+        environment = client.check_environment()
+        return success_result(base_url=client.base_url, health=health, environment=environment)
+    except McpAppError as exc:
+        return exc.to_result()
+    except Exception as exc:  # pragma: no cover - safety boundary for MCP tools
+        logging.exception("Failed to check local workbench")
+        return error_result(ErrorCode.INTERNAL_ERROR, "Failed to check local workbench", str(exc))
+
+
+def ensure_cdp_browser(
+    port: int = 9222,
+    headless: bool = False,
+    base_url: str = "http://127.0.0.1:8080",
+) -> dict[str, Any]:
+    """Ensure a local Chrome/Edge CDP browser is reachable."""
+    try:
+        return DesktopAgentClient(base_url=base_url).ensure_cdp_browser(port=port, headless=headless)
+    except McpAppError as exc:
+        return exc.to_result()
+    except Exception as exc:  # pragma: no cover - safety boundary for MCP tools
+        logging.exception("Failed to ensure CDP browser")
+        return error_result(ErrorCode.INTERNAL_ERROR, "Failed to ensure CDP browser", str(exc))
+
+
+def start_local_xhs_search(
+    keywords: list[str],
+    max_contents: int = 20,
+    max_comments_per_content: int = 10,
+    include_comments: bool = True,
+    include_sub_comments: bool = False,
+    cdp_debug_port: int = 9222,
+    headless: bool = False,
+    base_url: str = "http://127.0.0.1:8080",
+) -> dict[str, Any]:
+    """Start a restricted Windows-local XHS search task."""
+    try:
+        return DesktopAgentClient(base_url=base_url).start_xhs_search(
+            keywords=keywords,
+            max_contents=max_contents,
+            max_comments_per_content=max_comments_per_content,
+            include_comments=include_comments,
+            include_sub_comments=include_sub_comments,
+            cdp_debug_port=cdp_debug_port,
+            headless=headless,
+        )
+    except McpAppError as exc:
+        return exc.to_result()
+    except Exception as exc:  # pragma: no cover - safety boundary for MCP tools
+        logging.exception("Failed to start local XHS search")
+        return error_result(ErrorCode.INTERNAL_ERROR, "Failed to start local XHS search", str(exc))
+
+
+def get_local_xhs_search_status(
+    task_id: str,
+    verbose: bool = False,
+    log_limit: int = 10,
+    include_files: bool = True,
+    base_url: str = "http://127.0.0.1:8080",
+) -> dict[str, Any]:
+    """Get status for a Windows-local XHS search task."""
+    try:
+        return DesktopAgentClient(base_url=base_url).get_task_status(
+            task_id,
+            include_logs=verbose,
+            include_files=include_files,
+            log_limit=log_limit,
+        )
+    except McpAppError as exc:
+        return exc.to_result()
+    except Exception as exc:  # pragma: no cover - safety boundary for MCP tools
+        logging.exception("Failed to get local XHS search status")
+        return error_result(ErrorCode.INTERNAL_ERROR, "Failed to get local XHS search status", str(exc))
+
+
+def cancel_local_xhs_search(
+    task_id: str,
+    base_url: str = "http://127.0.0.1:8080",
+) -> dict[str, Any]:
+    """Cancel a Windows-local XHS search task."""
+    try:
+        return DesktopAgentClient(base_url=base_url).cancel_task(task_id)
+    except McpAppError as exc:
+        return exc.to_result()
+    except Exception as exc:  # pragma: no cover - safety boundary for MCP tools
+        logging.exception("Failed to cancel local XHS search")
+        return error_result(ErrorCode.INTERNAL_ERROR, "Failed to cancel local XHS search", str(exc))
+
+
+def retry_local_xhs_search(
+    task_id: str,
+    base_url: str = "http://127.0.0.1:8080",
+) -> dict[str, Any]:
+    """Retry a Windows-local XHS search task with a fresh task output directory."""
+    try:
+        return DesktopAgentClient(base_url=base_url).retry_task(task_id)
+    except McpAppError as exc:
+        return exc.to_result()
+    except Exception as exc:  # pragma: no cover - safety boundary for MCP tools
+        logging.exception("Failed to retry local XHS search")
+        return error_result(ErrorCode.INTERNAL_ERROR, "Failed to retry local XHS search", str(exc))
+
+
+def finalize_local_xhs_search(
+    task_id: str,
+    normalize: bool = True,
+    generate_report: bool = True,
+    dataset_name: str = "",
+    description: str = "",
+    base_url: str = "http://127.0.0.1:8080",
+) -> dict[str, Any]:
+    """Finalize a Windows-local XHS search into a registered MCP dataset."""
+    try:
+        client = DesktopAgentClient(base_url=base_url)
+        finalized = client.finalize_task(task_id, dataset_name=dataset_name, description=description)
+        dataset_dir = finalized.get("dataset_dir")
+        if not dataset_dir:
+            raise McpAppError(ErrorCode.INVALID_ARGUMENT, "Local finalize did not return dataset_dir")
+
+        registered = _importer().register_dataset(dataset_dir=dataset_dir, import_mode="link")
+        dataset_id = registered["dataset_id"]
+        normalized = None
+        report = None
+        if normalize:
+            normalized = DatasetNormalizer(_storage()).normalize_dataset(dataset_id, force=True)
+        if generate_report:
+            report = ReportService(_storage()).generate_report(dataset_id=dataset_id)
+
+        return success_result(
+            task_id=task_id,
+            dataset_id=dataset_id,
+            local_finalize=finalized,
+            registered=registered,
+            normalized=normalized,
+            report=report,
+            preview=(finalized.get("files") or [])[:3],
+        )
+    except McpAppError as exc:
+        return exc.to_result()
+    except Exception as exc:  # pragma: no cover - safety boundary for MCP tools
+        logging.exception("Failed to finalize local XHS search")
+        return error_result(ErrorCode.INTERNAL_ERROR, "Failed to finalize local XHS search", str(exc))
+
+
+DESKTOP_AGENT_TOOLS = (
+    check_local_workbench,
+    ensure_cdp_browser,
+    start_local_xhs_search,
+    get_local_xhs_search_status,
+    cancel_local_xhs_search,
+    retry_local_xhs_search,
+    finalize_local_xhs_search,
+)
+
+
+def _register_desktop_agent_tools() -> None:
+    config = load_config()
+    if config.tool_profile != "desktop_agent":
+        return
+    for tool in DESKTOP_AGENT_TOOLS:
+        mcp.tool()(tool)
+
+
 def _register_experimental_collection_tools() -> None:
     config = load_config()
     if not config.enable_experimental_collection:
@@ -456,6 +626,7 @@ def _register_experimental_collection_tools() -> None:
         mcp.tool()(tool)
 
 
+_register_desktop_agent_tools()
 _register_experimental_collection_tools()
 
 

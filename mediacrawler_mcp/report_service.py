@@ -2,11 +2,17 @@ from __future__ import annotations
 
 import html
 import json
+import re
 from collections import Counter
 from pathlib import Path
 from typing import Any
 
 import duckdb
+
+try:  # jieba is optional in some lightweight MCP deployments.
+    import jieba
+except Exception:  # pragma: no cover - import-time optional dependency guard
+    jieba = None
 
 from mediacrawler_mcp.errors import ErrorCode, McpAppError
 from mediacrawler_mcp.storage import Storage
@@ -14,6 +20,21 @@ from mediacrawler_mcp.utils import make_report_id, utc_now_iso
 
 
 AD_KEYWORDS = ("私信", "进群", "课程", "训练营", "资料包", "领取", "加我", "变现")
+COMMENT_STOPWORDS = {
+    "这个",
+    "那个",
+    "就是",
+    "还是",
+    "因为",
+    "所以",
+    "真的",
+    "没有",
+    "一个",
+    "可以",
+    "应该",
+}
+TOKEN_PATTERN = re.compile(r"[\w\u4e00-\u9fff]+", re.UNICODE)
+CHINESE_PATTERN = re.compile(r"[\u4e00-\u9fff]")
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -74,14 +95,36 @@ def _top_comments(conn: duckdb.DuckDBPyConnection, top_n: int) -> list[dict[str,
     return [dict(zip(columns, row)) for row in rows]
 
 
+def _fallback_tokens(text: str) -> list[str]:
+    tokens: list[str] = []
+    for part in TOKEN_PATTERN.findall(text):
+        if CHINESE_PATTERN.search(part) and len(part) > 4:
+            tokens.extend(part[index : index + 2] for index in range(0, len(part), 2))
+        else:
+            tokens.append(part)
+    return tokens
+
+
+def _comment_tokens(text: str) -> list[str]:
+    raw_tokens = jieba.lcut(text) if jieba else _fallback_tokens(text)
+    tokens: list[str] = []
+    for raw_token in raw_tokens:
+        matches = TOKEN_PATTERN.findall(str(raw_token).strip().lower())
+        token = "".join(matches)
+        if len(token) < 2:
+            continue
+        if token.isdigit() or token in COMMENT_STOPWORDS:
+            continue
+        tokens.append(token)
+    return tokens
+
+
 def _word_frequency(conn: duckdb.DuckDBPyConnection, top_n: int = 50) -> dict[str, int]:
     rows = conn.execute("SELECT comment_text FROM comments WHERE comment_text != ''").fetchall()
     counter: Counter[str] = Counter()
     for (text,) in rows:
-        for token in str(text).replace("，", " ").replace("。", " ").replace(",", " ").split():
-            token = token.strip()
-            if len(token) >= 2:
-                counter[token] += 1
+        for token in _comment_tokens(str(text)):
+            counter[token] += 1
     return {word: int(count) for word, count in counter.most_common(top_n)}
 
 

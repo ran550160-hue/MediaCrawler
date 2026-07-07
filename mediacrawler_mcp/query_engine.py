@@ -28,6 +28,7 @@ class QueryEngine:
         platform: str | None = None,
         source_keyword: str | None = None,
         limit: int = 20,
+        offset: int = 0,
         sort_by: str | None = None,
     ) -> list[dict[str, Any]]:
         dataset_id = (dataset_id or "").strip()
@@ -36,6 +37,7 @@ class QueryEngine:
         platform = platform.strip().lower() if platform else None
         source_keyword = source_keyword.strip() if source_keyword else None
         limit = max(1, min(int(limit or 20), 100))
+        offset = max(0, int(offset or 0))
 
         if not dataset_id:
             raise McpAppError(ErrorCode.INVALID_ARGUMENT, "Dataset ID is required")
@@ -67,6 +69,7 @@ class QueryEngine:
             source_keyword=source_keyword,
             sort_by=sort_column,
             limit=limit,
+            offset=offset,
         )
         with duckdb.connect(str(duckdb_path), read_only=True) as conn:
             rows = conn.execute(sql, params).fetchall()
@@ -82,6 +85,7 @@ class QueryEngine:
         source_keyword: str | None,
         sort_by: str,
         limit: int,
+        offset: int,
     ) -> tuple[str, list[Any]]:
         params: list[Any] = [dataset_id]
         where = ["dataset_id = ?"]
@@ -112,12 +116,13 @@ class QueryEngine:
             params.append(f"%{token}%")
 
         order_expr = "publish_datetime" if sort_by == "publish_time" else sort_by
-        params.append(limit)
+        params.extend([limit, offset])
         sql = f"""
             SELECT {select}
             FROM {target}
             WHERE {" AND ".join(where)}
             ORDER BY {order_expr} DESC NULLS LAST
             LIMIT ?
+            OFFSET ?
         """
         return sql, params
