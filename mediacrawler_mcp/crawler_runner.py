@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from mediacrawler_mcp.dataset_importer import RAW_FILE_NAMES
 from mediacrawler_mcp.errors import ErrorCode, McpAppError
 
 
@@ -112,39 +113,127 @@ class CrawlerRunner:
 
     def archive_outputs(self, output_dir: Path, raw_dir: Path, max_contents: int | None = None) -> dict[str, str]:
         raw_dir.mkdir(parents=True, exist_ok=True)
-        jsonl_dir = output_dir / "xhs" / "jsonl"
-        if not jsonl_dir.exists():
-            raise McpAppError(
-                ErrorCode.CRAWLER_FAILED,
-                "Crawler did not produce xhs jsonl output",
-                f"Missing output directory: {jsonl_dir}",
-            )
 
         archived: dict[str, str] = {}
         selected_content_ids: set[str] | None = None
-        for item_type, target_name in (("contents", "xhs_contents.jsonl"), ("comments", "xhs_comments.jsonl")):
-            candidates = sorted(
-                jsonl_dir.glob(f"search_{item_type}_*.jsonl"),
-                key=lambda path: (path.stat().st_mtime, path.name),
-                reverse=True,
-            )
-            if not candidates:
-                continue
-            target = raw_dir / target_name
-            if item_type == "contents" and max_contents:
-                selected_content_ids = self._copy_limited_contents(candidates[0], target, max_contents)
-            elif item_type == "comments" and selected_content_ids is not None:
-                self._copy_comments_for_contents(candidates[0], target, selected_content_ids)
+        discovery = self._discover_run_layout(output_dir, platform="xhs")
+        layout = discovery["output_layout"]
+        run_id = discovery.get("run_id")
+        contents_source = discovery["contents_source"]
+        comments_source = discovery["comments_source"]
+        raw_names = RAW_FILE_NAMES["xhs"]
+
+        if contents_source:
+            target = raw_dir / raw_names["contents"]
+            if max_contents:
+                selected_content_ids = self._copy_limited_contents(contents_source, target, max_contents)
             else:
-                shutil.copyfile(candidates[0], target)
-            archived[item_type] = str(target)
+                shutil.copyfile(contents_source, target)
+                selected_content_ids = self._collect_content_ids(contents_source)
+            archived["contents"] = str(target)
+        if comments_source:
+            target = raw_dir / raw_names["comments"]
+            if selected_content_ids is not None:
+                self._copy_comments_for_contents(comments_source, target, selected_content_ids)
+            else:
+                shutil.copyfile(comments_source, target)
+            archived["comments"] = str(target)
         if not archived:
             raise McpAppError(
                 ErrorCode.CRAWLER_FAILED,
                 "Crawler did not produce contents or comments JSONL files",
-                f"Output directory: {jsonl_dir}",
+               f"Output directory: {jsonl_dir}",
             )
+        archived["output_layout"] = layout
+        archived["run_id"] = run_id or ""
         return archived
+
+    def _discover_run_layout(self, output_dir: Path, platform: str) -> dict[str, Any]:
+        """Discover the contents/comments layout for a crawler run output.
+
+        Prefers the run-isolated layout (``<output_dir>/<platform>/<run_id>/...``)
+        and selects a single run directory deterministically. Falls back to the
+        legacy shared ``<output_dir>/<platform>/jsonl/search_*_YYYY-MM-DD.jsonl``
+        layout only when no run directory exists.
+        """
+        platform_dir = output_dir / platform
+        if not platform_dir.exists():
+            raise McpAppError(
+                ErrorCode.CRAWLER_FAILED,
+                f"Crawler did not produce {platform} output",
+                f"Missing output directory: {platform_dir}",
+            )
+
+        run_dirs = [
+            child
+            for child in platform_dir.iterdir()
+            if child.is_dir() and (child / "run_metadata.json").exists()
+        ]
+        # Keep only run directories that actually contain a usable contents or
+        # comments file, so stale empty runs from prior failed tasks do not
+        # create ambiguous choices.
+        usable_run_dirs = [
+            run for run in run_dirs
+            if (run / "jsonl" / "search_contents.jsonl").exists()
+            or (run / "jsonl" / "search_comments.jsonl").exists()
+        ]
+
+        if usable_run_dirs:
+            chosen = self._select_run_directory(usable_run_dirs)
+            return {
+                "output_layout": "run_isolated",
+                "run_id": chosen.name,
+                "contents_source": chosen / "jsonl" / "search_contents.jsonl",
+                "comments_source": chosen / "jsonl" / "search_comments.jsonl",
+            }
+
+        jsonl_dir = platform_dir / "jsonl"
+        contents_source = self._latest_legacy_file(jsonl_dir, "contents")
+        comments_source = self._latest_legacy_file(jsonl_dir, "comments")
+        if contents_source is None and comments_source is None:
+            raise McpAppError(
+                ErrorCode.CRAWLER_FAILED,
+                f"Crawler did not produce {platform} jsonl output",
+                f"Missing output directory: {jsonl_dir}",
+            )
+        return {
+            "output_layout": "legacy_shared",
+            "run_id": None,
+            "contents_source": contents_source,
+            "comments_source": comments_source,
+        }
+
+    @staticmethod
+    def _select_run_directory(run_dirs: list[Path]) -> Path:
+        if len(run_dirs) == 1:
+            return run_dirs[0]
+        # Prefer a single run directory with actual contents data; if more than
+        # one has contents, this is ambiguous and we refuse to silently merge.
+        with_contents = [run for run in run_dirs if (run / "jsonl" / "search_contents.jsonl").exists()]
+        if len(with_contents) == 1:
+            return with_contents[0]
+        # As a last resort, fall back to the most recently modified run, but only
+        # if no two runs share the same mtime second (which would be ambiguous).
+        newest = max(run_dirs, key=lambda path: (path.stat().st_mtime, path.name))
+        tied = [run for run in run_dirs if abs(run.stat().st_mtime - newest.stat().st_mtime) < 1.0]
+        if len(tied) > 1:
+            raise McpAppError(
+                ErrorCode.CRAWLER_FAILED,
+                "Multiple crawler runs detected; refusing to silently merge",
+                "Found run directories: " + ", ".join(sorted(run.name for run in run_dirs)),
+            )
+        return newest
+
+    @staticmethod
+    def _latest_legacy_file(jsonl_dir: Path, item_type: str) -> Path | None:
+        if not jsonl_dir.exists():
+            return None
+        candidates = sorted(
+            jsonl_dir.glob(f"search_{item_type}_*.jsonl"),
+            key=lambda path: (path.stat().st_mtime, path.name),
+            reverse=True,
+        )
+        return candidates[0] if candidates else None
 
     @staticmethod
     def _copy_limited_contents(source: Path, target: Path, max_contents: int) -> set[str]:
@@ -179,3 +268,19 @@ class CrawlerRunner:
                     continue
                 if str(item.get("note_id") or "").strip() in content_ids:
                     dst.write(line)
+
+    @staticmethod
+    def _collect_content_ids(source: Path) -> set[str]:
+        ids: set[str] = set()
+        with source.open("r", encoding="utf-8") as src:
+            for line in src:
+                if not line.strip():
+                    continue
+                try:
+                    item = json.loads(line)
+                except Exception:
+                    continue
+                content_id = str(item.get("note_id") or "").strip()
+                if content_id:
+                    ids.add(content_id)
+        return ids

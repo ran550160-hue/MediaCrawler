@@ -223,7 +223,9 @@ def test_archive_outputs_trims_contents_and_related_comments(tmp_path):
     raw_dir = tmp_path / "raw"
     archived = CrawlerRunner(repo_root=tmp_path).archive_outputs(output_dir, raw_dir, max_contents=2)
 
-    assert set(archived) == {"contents", "comments"}
+    assert set(archived) >= {"contents", "comments"}
+    assert archived["output_layout"] == "legacy_shared"
+    assert archived["run_id"] == ""
     content_rows = [
         json.loads(line)
         for line in (raw_dir / "xhs_contents.jsonl").read_text(encoding="utf-8").splitlines()
@@ -234,6 +236,102 @@ def test_archive_outputs_trims_contents_and_related_comments(tmp_path):
     ]
     assert [row["note_id"] for row in content_rows] == ["n1", "n2"]
     assert [row["note_id"] for row in comment_rows] == ["n1", "n2"]
+
+
+def _write_run_directory(run_dir: Path, run_id: str, contents: list[dict], comments: list[dict]) -> None:
+    jsonl_dir = run_dir / "jsonl"
+    jsonl_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "run_metadata.json").write_text(json.dumps({"run_id": run_id}), encoding="utf-8")
+    (jsonl_dir / "search_contents.jsonl").write_text(
+        "".join(json.dumps(item, ensure_ascii=False) + "\n" for item in contents), encoding="utf-8"
+    )
+    (jsonl_dir / "search_comments.jsonl").write_text(
+        "".join(json.dumps(item, ensure_ascii=False) + "\n" for item in comments), encoding="utf-8"
+    )
+
+
+def test_archive_outputs_discovers_run_isolated_layout(tmp_path):
+    output_dir = tmp_path / "output"
+    run_dir = output_dir / "xhs" / "run_20260711_180626_016ab9"
+    _write_run_directory(
+        run_dir,
+        "run_20260711_180626_016ab9",
+        [{"note_id": "n1", "title": "one"}, {"note_id": "n2", "title": "two"}],
+        [{"comment_id": "c1", "note_id": "n1"}, {"comment_id": "c2", "note_id": "n2"}],
+    )
+
+    raw_dir = tmp_path / "raw"
+    archived = CrawlerRunner(repo_root=tmp_path).archive_outputs(output_dir, raw_dir)
+
+    assert archived["output_layout"] == "run_isolated"
+    assert archived["run_id"] == "run_20260711_180626_016ab9"
+    content_rows = [
+        json.loads(line)
+        for line in (raw_dir / "xhs_contents.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    comment_rows = [
+        json.loads(line)
+        for line in (raw_dir / "xhs_comments.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert [row["note_id"] for row in content_rows] == ["n1", "n2"]
+    assert [row["note_id"] for row in comment_rows] == ["n1", "n2"]
+
+
+def test_archive_outputs_refuses_to_silently_merge_multiple_runs(tmp_path):
+    output_dir = tmp_path / "output"
+    _write_run_directory(
+        output_dir / "xhs" / "run_aaa", "run_aaa", [{"note_id": "a1"}], [{"comment_id": "a1c", "note_id": "a1"}]
+    )
+    _write_run_directory(
+        output_dir / "xhs" / "run_bbb", "run_bbb", [{"note_id": "b1"}], [{"comment_id": "b1c", "note_id": "b1"}]
+    )
+
+    raw_dir = tmp_path / "raw"
+    with pytest.raises(McpAppError) as exc_info:
+        CrawlerRunner(repo_root=tmp_path).archive_outputs(output_dir, raw_dir)
+
+    assert exc_info.value.code == ErrorCode.CRAWLER_FAILED
+    assert "refusing to silently merge" in exc_info.value.message
+    assert "run_aaa" in exc_info.value.detail
+    assert "run_bbb" in exc_info.value.detail
+
+
+def test_archive_outputs_skips_empty_runs_when_selecting(tmp_path):
+    output_dir = tmp_path / "output"
+    (output_dir / "xhs" / "run_empty" / "jsonl").mkdir(parents=True)
+    (output_dir / "xhs" / "run_empty" / "run_metadata.json").write_text("{}", encoding="utf-8")
+    _write_run_directory(
+        output_dir / "xhs" / "run_good", "run_good", [{"note_id": "n1"}], [{"comment_id": "c1", "note_id": "n1"}]
+    )
+
+    raw_dir = tmp_path / "raw"
+    archived = CrawlerRunner(repo_root=tmp_path).archive_outputs(output_dir, raw_dir)
+
+    assert archived["run_id"] == "run_good"
+
+
+def test_archive_outputs_picks_most_recent_run_when_unambiguous(tmp_path):
+    import os
+    import time as _time
+
+    output_dir = tmp_path / "output"
+    _write_run_directory(
+        output_dir / "xhs" / "run_older", "run_older", [{"note_id": "o1"}], [{"comment_id": "oc", "note_id": "o1"}]
+    )
+    _time.sleep(1.1)
+    _write_run_directory(
+        output_dir / "xhs" / "run_newer", "run_newer", [{"note_id": "n1"}], [{"comment_id": "nc", "note_id": "n1"}]
+    )
+
+    raw_dir = tmp_path / "raw"
+    archived = CrawlerRunner(repo_root=tmp_path).archive_outputs(output_dir, raw_dir)
+
+    assert archived["run_id"] == "run_newer"
+    content_rows = [
+        json.loads(line)
+        for line in (raw_dir / "xhs_contents.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert [row["note_id"] for row in content_rows] == ["n1"]
 
 
 def test_start_collection_marks_failed_when_process_fails(tmp_path):
