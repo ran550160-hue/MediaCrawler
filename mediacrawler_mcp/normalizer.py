@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,7 @@ CONTENT_COLUMNS = (
     "title",
     "desc",
     "content_text",
+    "tags",
     "url",
     "publish_time",
     "publish_datetime",
@@ -33,6 +35,10 @@ CONTENT_COLUMNS = (
     "crawl_time",
     "raw_json",
 )
+
+TAG_PATTERN = re.compile(r"#([^#\s\[]+)(?:\[话题\])?#?")
+TOPIC_MARKER_PATTERN = re.compile(r"\[话题\]")
+WHITESPACE_PATTERN = re.compile(r"\s+")
 
 COMMENT_COLUMNS = (
     "dataset_id",
@@ -56,6 +62,28 @@ def _text(value: Any) -> str:
     if value is None:
         return ""
     return str(value)
+
+
+def _first_value(item: dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        value = item.get(key)
+        if value is not None and str(value).strip() != "":
+            return value
+    return None
+
+
+def _first_number(item: dict[str, Any], *keys: str) -> int:
+    first_value = None
+    for key in keys:
+        value = item.get(key)
+        if value is None or str(value).strip() == "":
+            continue
+        if first_value is None:
+            first_value = value
+        number = _number(value)
+        if number != 0:
+            return number
+    return _number(first_value)
 
 
 def _number(value: Any) -> int:
@@ -101,6 +129,78 @@ def _datetime(value: Any) -> datetime | None:
         return None
 
 
+def _collapse_spaces(value: str) -> str:
+    return WHITESPACE_PATTERN.sub(" ", value).strip()
+
+
+def _dedupe_repeated_text(value: str) -> str:
+    text = _collapse_spaces(value)
+    if not text:
+        return ""
+    tokens = text.split(" ")
+    if len(tokens) > 1 and len(tokens) % 2 == 0:
+        midpoint = len(tokens) // 2
+        if tokens[:midpoint] == tokens[midpoint:]:
+            return " ".join(tokens[:midpoint])
+    if len(text) % 2 == 0:
+        midpoint = len(text) // 2
+        if text[:midpoint] == text[midpoint:]:
+            return text[:midpoint]
+    return text
+
+
+def _clean_topic_text(value: Any) -> str:
+    text = _text(value)
+    if not text:
+        return ""
+    without_tags = TAG_PATTERN.sub(" ", text)
+    without_markers = TOPIC_MARKER_PATTERN.sub("", without_tags)
+    return _dedupe_repeated_text(without_markers)
+
+
+def _clean_tag(value: Any) -> str:
+    text = TOPIC_MARKER_PATTERN.sub("", _text(value)).strip().strip("#").strip()
+    return text
+
+
+def _unique_tags(tags: list[str]) -> list[str]:
+    seen: set[str] = set()
+    unique = []
+    for tag in tags:
+        cleaned = _clean_tag(tag)
+        if cleaned and cleaned not in seen:
+            seen.add(cleaned)
+            unique.append(cleaned)
+    return unique
+
+
+def _extract_tags_from_text(*values: Any) -> list[str]:
+    tags: list[str] = []
+    for value in values:
+        text = _text(value)
+        if not text:
+            continue
+        tags.extend(match.group(1) for match in TAG_PATTERN.finditer(text))
+    return _unique_tags(tags)
+
+
+def _extract_plain_tags(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, dict):
+        tags: list[str] = []
+        for key in ("name", "tag_name", "tag", "title", "text"):
+            if key in value:
+                tags.extend(_extract_plain_tags(value[key]))
+        return _unique_tags(tags)
+    if isinstance(value, (list, tuple, set)):
+        tags: list[str] = []
+        for item in value:
+            tags.extend(_extract_plain_tags(item))
+        return _unique_tags(tags)
+    return _unique_tags([_text(value)])
+
+
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     rows = []
     with path.open("r", encoding="utf-8") as f:
@@ -127,22 +227,60 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
 
 
 def _normalize_content(dataset_id: str, item: dict[str, Any]) -> dict[str, Any]:
-    like_count = _number(item.get("liked_count") or item.get("like_count"))
-    comment_count = _number(item.get("comment_count"))
-    share_count = _number(item.get("share_count"))
-    collect_count = _number(item.get("collected_count") or item.get("collect_count"))
-    publish_time = item.get("time") or item.get("publish_time")
+    like_count = _first_number(
+        item,
+        "liked_count",
+        "like_count",
+        "likedCount",
+        "likeCount",
+        "likes",
+        "likes_count",
+        "like_num",
+        "liked_num",
+        "likeNum",
+    )
+    comment_count = _first_number(
+        item,
+        "comment_count",
+        "comments_count",
+        "commentCount",
+        "commentsCount",
+        "comments",
+        "comment_num",
+    )
+    share_count = _first_number(item, "share_count", "shares", "shareCount", "shares_count", "share_num")
+    collect_count = _first_number(
+        item,
+        "collected_count",
+        "collect_count",
+        "collectedCount",
+        "collectCount",
+        "favorite_count",
+        "favoriteCount",
+        "favorites",
+        "collect_num",
+        "collected_num",
+    )
+    publish_time = _first_value(item, "time", "publish_time", "create_time", "last_update_time")
+    raw_title = item.get("title")
+    raw_desc = _first_value(item, "desc", "description")
+    raw_content = _first_value(item, "content", "content_text", "desc", "description")
+    tags = _unique_tags(
+        _extract_tags_from_text(raw_title, raw_desc, raw_content)
+        + _extract_plain_tags(_first_value(item, "tags", "tag_list", "topic_list", "hash_tags"))
+    )
     raw_json = json.dumps(item, ensure_ascii=False)
     return {
         "dataset_id": dataset_id,
         "platform": "xhs",
         "source_keyword": _text(item.get("source_keyword")),
-        "content_id": _text(item.get("note_id")),
+        "content_id": _text(_first_value(item, "note_id", "content_id", "id")),
         "author_id": _text(item.get("user_id")),
         "author_name": _text(item.get("nickname") or item.get("user_nickname")),
-        "title": _text(item.get("title")),
-        "desc": _text(item.get("desc")),
-        "content_text": _text(item.get("content") or item.get("desc")),
+        "title": _clean_topic_text(raw_title),
+        "desc": _clean_topic_text(raw_desc),
+        "content_text": _clean_topic_text(raw_content),
+        "tags": json.dumps(tags, ensure_ascii=False),
         "url": _text(item.get("note_url")),
         "publish_time": _text(publish_time),
         "publish_datetime": _datetime(publish_time),
@@ -180,20 +318,20 @@ def _flatten_comment_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _normalize_comment(dataset_id: str, item: dict[str, Any], source_keyword_by_content: dict[str, str]) -> dict[str, Any]:
-    content_id = _text(item.get("note_id"))
-    publish_time = item.get("create_time") or item.get("publish_time")
+    content_id = _text(_first_value(item, "note_id", "content_id", "aweme_id"))
+    publish_time = _first_value(item, "create_time", "publish_time", "time")
     raw_json = json.dumps(item, ensure_ascii=False)
     return {
         "dataset_id": dataset_id,
         "platform": "xhs",
         "source_keyword": _text(item.get("source_keyword")) or source_keyword_by_content.get(content_id, ""),
         "content_id": content_id,
-        "comment_id": _text(item.get("comment_id")),
-        "parent_comment_id": _text(item.get("parent_comment_id")),
+        "comment_id": _text(_first_value(item, "comment_id", "id", "commentId")),
+        "parent_comment_id": _text(_first_value(item, "parent_comment_id", "parent_id", "parentCommentId")),
         "user_id": _text(item.get("user_id")),
         "user_name": _text(item.get("nickname") or item.get("user_nickname")),
-        "comment_text": _text(item.get("content")),
-        "like_count": _number(item.get("like_count")),
+        "comment_text": _text(_first_value(item, "content", "comment_text", "comment_content", "text")),
+        "like_count": _number(_first_value(item, "like_count", "liked_count", "like_num")),
         "publish_time": _text(publish_time),
         "publish_datetime": _datetime(publish_time),
         "crawl_time": _text(item.get("last_modify_ts") or item.get("crawl_time") or utc_now_iso()),
@@ -202,9 +340,11 @@ def _normalize_comment(dataset_id: str, item: dict[str, Any], source_keyword_by_
 
 
 def _create_tables(conn: duckdb.DuckDBPyConnection) -> None:
+    conn.execute("DROP TABLE IF EXISTS contents")
+    conn.execute("DROP TABLE IF EXISTS comments")
     conn.execute(
         """
-        CREATE TABLE IF NOT EXISTS contents (
+        CREATE TABLE contents (
           dataset_id TEXT,
           platform TEXT,
           source_keyword TEXT,
@@ -214,6 +354,7 @@ def _create_tables(conn: duckdb.DuckDBPyConnection) -> None:
           title TEXT,
           "desc" TEXT,
           content_text TEXT,
+          tags TEXT,
           url TEXT,
           publish_time TEXT,
           publish_datetime TIMESTAMP,
@@ -229,7 +370,7 @@ def _create_tables(conn: duckdb.DuckDBPyConnection) -> None:
     )
     conn.execute(
         """
-        CREATE TABLE IF NOT EXISTS comments (
+        CREATE TABLE comments (
           dataset_id TEXT,
           platform TEXT,
           source_keyword TEXT,

@@ -68,12 +68,41 @@ class DesktopAgentClient:
     def check_environment(self, cdp_port: int = 9222) -> dict[str, Any]:
         return self._request("GET", f"/api/env/check?cdp_port={cdp_port}")
 
-    def ensure_cdp_browser(self, port: int = 9222, headless: bool = False) -> dict[str, Any]:
+    def ensure_cdp_browser(
+        self,
+        port: int = 9222,
+        headless: bool = False,
+        user_data_dir: str = "",
+        start_url: str = "",
+    ) -> dict[str, Any]:
         status = self._request("GET", f"/api/browser/cdp/status?port={port}")
         if status.get("reachable"):
-            return {"status": "success", "message": "CDP browser is already reachable", **status}
-        result = self._request("POST", "/api/browser/cdp/start", json={"port": port, "headless": headless})
-        return {"status": "success", **result}
+            opened = None
+            if start_url:
+                opened = self._request(
+                    "POST",
+                    "/api/browser/cdp/open",
+                    json={"port": port, "url": start_url},
+                )
+            return convert_windows_paths(
+                {
+                    "status": "success",
+                    "message": "CDP browser is already reachable",
+                    **status,
+                    "opened": opened,
+                }
+            )
+        result = self._request(
+            "POST",
+            "/api/browser/cdp/start",
+            json={
+                "port": port,
+                "headless": headless,
+                "user_data_dir": user_data_dir,
+                "start_url": start_url,
+            },
+        )
+        return convert_windows_paths({"status": "success", **result})
 
     def start_xhs_search(
         self,
@@ -84,6 +113,7 @@ class DesktopAgentClient:
         include_sub_comments: bool = False,
         cdp_debug_port: int = 9222,
         headless: bool = False,
+        timeout_seconds: int = 1800,
     ) -> dict[str, Any]:
         return convert_windows_paths(
             self._request(
@@ -97,6 +127,7 @@ class DesktopAgentClient:
                     "include_sub_comments": include_sub_comments,
                     "cdp_debug_port": cdp_debug_port,
                     "headless": headless,
+                    "timeout_seconds": timeout_seconds,
                 },
             )
         )
@@ -120,7 +151,13 @@ class DesktopAgentClient:
             )
         )
 
-    def finalize_task(self, task_id: str, dataset_name: str = "", description: str = "") -> dict[str, Any]:
+    def finalize_task(
+        self,
+        task_id: str,
+        dataset_name: str = "",
+        description: str = "",
+        force: bool = False,
+    ) -> dict[str, Any]:
         return convert_windows_paths(
             self._request(
                 "POST",
@@ -128,6 +165,7 @@ class DesktopAgentClient:
                 json={
                     "dataset_name": dataset_name,
                     "description": description,
+                    "force": force,
                 },
             )
         )
@@ -135,8 +173,14 @@ class DesktopAgentClient:
     def cancel_task(self, task_id: str) -> dict[str, Any]:
         return convert_windows_paths(self._request("POST", f"/api/agent/tasks/{task_id}/cancel"))
 
-    def retry_task(self, task_id: str) -> dict[str, Any]:
-        return convert_windows_paths(self._request("POST", f"/api/agent/tasks/{task_id}/retry"))
+    def retry_task(self, task_id: str, append: bool = True) -> dict[str, Any]:
+        return convert_windows_paths(
+            self._request(
+                "POST",
+                f"/api/agent/tasks/{task_id}/retry",
+                params={"append": append},
+            )
+        )
 
     def _request(
         self,

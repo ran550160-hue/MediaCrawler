@@ -164,8 +164,17 @@ label {
 .cdp-actions {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 10px;
   margin-top: 14px;
+}
+
+.cdp-profile {
+  margin-top: 12px;
+}
+
+.cdp-profile small {
+  overflow-wrap: anywhere;
 }
 
 .agent-hint {

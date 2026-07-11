@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional
 
@@ -27,6 +27,8 @@ router = APIRouter(prefix="/agent", tags=["agent"])
 
 MAX_AGENT_CONTENTS = 200
 MAX_AGENT_COMMENTS_PER_CONTENT = 200
+CAPTCHA_BACKOFF_THRESHOLD = 5
+FINALIZABLE_STATUSES = {"completed", "partial_success", "cancelled_partial", "failed_with_data"}
 
 _tasks: dict[str, dict[str, Any]] = {}
 _current_task_id: Optional[str] = None
@@ -85,8 +87,101 @@ def _log_summary(logs: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _count_jsonl_lines(path: Path | None) -> int:
+    if not path or not path.exists():
+        return 0
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            return sum(1 for line in f if line.strip())
+    except OSError:
+        return 0
+
+
+def _task_progress(task: dict[str, Any]) -> dict[str, Any]:
+    request = task.get("request") or {}
+    candidates = _candidate_jsonl_files(task)
+    contents_count = _count_jsonl_lines(candidates["contents"])
+    comments_count = _count_jsonl_lines(candidates["comments"])
+    max_contents = int(request.get("max_contents") or 0)
+    max_comments_per_content = int(request.get("max_comments_per_content") or 0)
+    include_comments = bool(request.get("include_comments", True))
+    comments_target = max_contents * max_comments_per_content if include_comments else 0
+    contents_complete = max_contents > 0 and contents_count >= max_contents
+    comments_complete = comments_target == 0 or comments_count >= comments_target
+    return {
+        "contents_count": contents_count,
+        "comments_count": comments_count,
+        "max_contents": max_contents,
+        "max_comments_per_content": max_comments_per_content,
+        "comments_target": comments_target,
+        "contents": f"{contents_count}/{max_contents}" if max_contents else f"{contents_count}/?",
+        "comments": f"{comments_count}/{comments_target}" if comments_target else f"{comments_count}/0",
+        "contents_complete": contents_complete,
+        "comments_complete": comments_complete,
+        "target_reached": contents_complete and comments_complete,
+        "has_output": contents_count > 0 or comments_count > 0,
+    }
+
+
+def _captcha_backoff_reached(logs: list[dict[str, Any]]) -> bool:
+    consecutive = 0
+    markers = ("461", "captcha", "验证码", "滑块", "risk control", "风控")
+    for log in reversed(logs):
+        message = str(log.get("message", "")).lower()
+        if any(marker.lower() in message for marker in markers):
+            consecutive += 1
+            if consecutive >= CAPTCHA_BACKOFF_THRESHOLD:
+                return True
+            continue
+        if consecutive:
+            break
+    return False
+
+
+def _stop_guard_reason(task: dict[str, Any], progress: dict[str, Any], logs: list[dict[str, Any]]) -> str | None:
+    if progress["target_reached"]:
+        return "target_reached"
+    timeout_seconds = int((task.get("request") or {}).get("timeout_seconds") or 0)
+    if timeout_seconds > 0 and datetime.now() - task["started_at"] >= timedelta(seconds=timeout_seconds):
+        return "timeout"
+    if _captcha_backoff_reached(logs):
+        return "captcha_backoff"
+    return None
+
+
+async def _stop_active_task(task: dict[str, Any], reason: str) -> None:
+    global _current_task_id
+
+    if _current_task_id == task["task_id"] and crawler_manager.process and crawler_manager.process.poll() is None:
+        await crawler_manager.stop()
+        _current_task_id = None
+
+    progress = _task_progress(task)
+    task["status"] = "partial_success" if progress["has_output"] else "failed"
+    task["completed_at"] = datetime.now()
+    task["exit_code"] = crawler_manager.last_exit_code
+    task["message"] = f"Local XHS search stopped: {reason}"
+    task["stop_reason"] = reason
+
+
+async def _apply_runtime_guards(task: dict[str, Any]) -> None:
+    if task["status"] not in {"accepted", "running", "needs_user_action"}:
+        return
+    if _current_task_id != task["task_id"] or crawler_manager.status != "running":
+        return
+    logs = _recent_logs(100)
+    progress = _task_progress(task)
+    reason = _stop_guard_reason(task, progress, logs)
+    if reason:
+        await _stop_active_task(task, reason)
+
+
 def _task_status(task: dict[str, Any]) -> str:
-    if task["status"] in {"failed", "completed", "partial_success", "cancelled"}:
+    if task["status"] == "failed" and _task_progress(task)["has_output"]:
+        task["status"] = "failed_with_data"
+    elif task["status"] == "cancelled" and _task_progress(task)["has_output"]:
+        task["status"] = "cancelled_partial"
+    if task["status"] in {"failed", "completed", "partial_success", "cancelled", "cancelled_partial", "failed_with_data"}:
         return task["status"]
     if crawler_manager.status == "running" and _current_task_id == task["task_id"]:
         logs = _recent_logs()
@@ -97,9 +192,10 @@ def _task_status(task: dict[str, Any]) -> str:
             "exited with code" in log["message"].lower() or log["level"] == "error"
             for log in logs
         )
-        files_available = bool(_task_files(task))
+        progress = _task_progress(task)
+        files_available = progress["has_output"]
         if failed:
-            task["status"] = "partial_success" if files_available else "failed"
+            task["status"] = "failed_with_data" if files_available else "failed"
         else:
             task["status"] = "completed" if files_available or crawler_manager.last_exit_code == 0 else "failed"
         task["completed_at"] = datetime.now()
@@ -149,6 +245,8 @@ def _task_payload(
     status = _task_status(task)
     logs = _recent_logs(log_limit)
     files = _task_files(task) if include_files else []
+    progress = _task_progress(task)
+    can_finalize = progress["has_output"]
     payload = {
         "task_id": task["task_id"],
         "status": status,
@@ -158,17 +256,24 @@ def _task_payload(
         "started_at": task["started_at"].isoformat(),
         "completed_at": task["completed_at"].isoformat() if task.get("completed_at") else None,
         "exit_code": crawler_manager.last_exit_code if _current_task_id == task["task_id"] else task.get("exit_code"),
-        "partial": status == "partial_success",
+        "partial": status in {"partial_success", "cancelled_partial", "failed_with_data"},
+        "stop_reason": task.get("stop_reason"),
+        "progress": progress,
         "log_summary": _log_summary(logs),
         "files": files,
-        "can_finalize": status in {"completed", "partial_success"} and bool(_task_files(task)),
+        "can_finalize": can_finalize,
     }
     if include_logs:
         payload["logs"] = logs
     return payload
 
 
-async def _start_agent_task(request: AgentXHSSearchRequest):
+async def _start_agent_task(
+    request: AgentXHSSearchRequest,
+    *,
+    data_root_override: Path | None = None,
+    retried_from: str | None = None,
+):
     """Create and start a task-scoped local XHS search."""
     global _current_task_id
 
@@ -187,7 +292,7 @@ async def _start_agent_task(request: AgentXHSSearchRequest):
         )
 
     task_id = _task_id()
-    data_root = _task_data_root(task_id)
+    data_root = data_root_override.resolve() if data_root_override else _task_data_root(task_id)
     data_root.mkdir(parents=True, exist_ok=True)
     crawler_request = CrawlerStartRequest(
         platform=PlatformEnum.XHS,
@@ -215,6 +320,7 @@ async def _start_agent_task(request: AgentXHSSearchRequest):
         "dataset_name": request.dataset_name,
         "description": request.description,
         "data_root": str(data_root),
+        "retried_from": retried_from,
         "started_at": datetime.now(),
         "completed_at": None,
         "exit_code": None,
@@ -236,6 +342,7 @@ async def _start_agent_task(request: AgentXHSSearchRequest):
         "status": "running",
         "message": task["message"],
         "data_root": str(data_root),
+        "retried_from": retried_from,
     }
 
 
@@ -255,6 +362,7 @@ async def get_agent_task(
     task = _tasks.get(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Agent task not found")
+    await _apply_runtime_guards(task)
     return _task_payload(
         task,
         include_logs=include_logs,
@@ -269,8 +377,21 @@ async def finalize_agent_task(task_id: str, request: AgentTaskFinalizeRequest):
     if not task:
         raise HTTPException(status_code=404, detail="Agent task not found")
 
+    await _apply_runtime_guards(task)
     status = _task_status(task)
-    if status not in {"completed", "partial_success"}:
+    progress = _task_progress(task)
+    if status in {"running", "needs_user_action", "accepted"} and progress["has_output"]:
+        await _stop_active_task(task, "manual_finalize")
+        status = _task_status(task)
+        progress = _task_progress(task)
+    elif status == "cancelled" and progress["has_output"]:
+        task["status"] = "cancelled_partial"
+        status = task["status"]
+    elif status == "failed" and progress["has_output"]:
+        task["status"] = "failed_with_data"
+        status = task["status"]
+
+    if status not in FINALIZABLE_STATUSES and not (request.force and progress["has_output"]):
         raise HTTPException(status_code=409, detail=f"Task is not ready to finalize: {status}")
 
     candidates = _candidate_jsonl_files(task)
@@ -303,7 +424,8 @@ async def finalize_agent_task(task_id: str, request: AgentTaskFinalizeRequest):
         "status": "success",
         **result,
         "task_status": status,
-        "partial": status == "partial_success",
+        "partial": status != "completed",
+        "progress": progress,
         "files": _task_files(task),
     }
 
@@ -316,15 +438,21 @@ async def cancel_agent_task(task_id: str):
     if not task:
         raise HTTPException(status_code=404, detail="Agent task not found")
 
+    await _apply_runtime_guards(task)
     status = _task_status(task)
-    if status in {"completed", "partial_success", "failed", "cancelled"}:
+    progress = _task_progress(task)
+    if status == "cancelled" and progress["has_output"]:
+        task["status"] = "cancelled_partial"
+        return _task_payload(task)
+    if status in {"completed", "partial_success", "failed", "cancelled", "cancelled_partial", "failed_with_data"}:
         return _task_payload(task)
 
     if _current_task_id == task_id and crawler_manager.process and crawler_manager.process.poll() is None:
         await crawler_manager.stop()
         _current_task_id = None
 
-    task["status"] = "cancelled"
+    progress = _task_progress(task)
+    task["status"] = "cancelled_partial" if progress["has_output"] else "cancelled"
     task["completed_at"] = datetime.now()
     task["exit_code"] = crawler_manager.last_exit_code
     task["message"] = "Local XHS search cancelled"
@@ -332,10 +460,11 @@ async def cancel_agent_task(task_id: str):
 
 
 @router.post("/tasks/{task_id}/retry", dependencies=[Depends(_require_agent_token)])
-async def retry_agent_task(task_id: str):
+async def retry_agent_task(task_id: str, append: bool = True):
     task = _tasks.get(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Agent task not found")
     request = AgentXHSSearchRequest(**task["request"])
-    result = await _start_agent_task(request)
-    return {"retried_from": task_id, **result}
+    data_root = Path(task["data_root"]) if append and task.get("data_root") else None
+    result = await _start_agent_task(request, data_root_override=data_root, retried_from=task_id)
+    return {"retried_from": task_id, "append": append, **result}

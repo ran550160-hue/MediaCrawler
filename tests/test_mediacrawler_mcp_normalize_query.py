@@ -186,6 +186,31 @@ def test_query_dataset_filters_comments_by_query_keyword_and_sort(tmp_path):
     assert results[0]["source_keyword"] == "AI编程副业"
 
 
+def test_query_dataset_searches_comment_text_field_aliases(tmp_path):
+    dataset_service, normalizer, query_engine = _services(tmp_path)
+    dataset = dataset_service.create_dataset(
+        name="评论字段别名",
+        platforms=["xhs"],
+        keywords=["AI工具"],
+    )
+    raw_dir = tmp_path / "datasets" / dataset.dataset_id / "raw"
+    _write_jsonl(
+        raw_dir / "xhs_contents.jsonl",
+        [{"note_id": "n1", "title": "AI工具推荐", "source_keyword": "AI工具"}],
+    )
+    _write_jsonl(
+        raw_dir / "xhs_comments.jsonl",
+        [{"note_id": "n1", "comment_id": "c1", "comment_content": "这个AI工具很好用推荐", "source_keyword": "AI工具"}],
+    )
+    normalizer.normalize_dataset(dataset.dataset_id)
+
+    results = query_engine.query_dataset(dataset.dataset_id, query="AI 推荐", target="comments")
+
+    assert len(results) == 1
+    assert results[0]["comment_id"] == "c1"
+    assert results[0]["text"] == "这个AI工具很好用推荐"
+
+
 def test_query_dataset_supports_offset_pagination(tmp_path):
     dataset, normalizer, query_engine = _dataset_with_raw(tmp_path)
     normalizer.normalize_dataset(dataset.dataset_id)
@@ -216,7 +241,56 @@ def test_query_dataset_can_query_contents(tmp_path):
     assert len(results) == 1
     assert results[0]["content_id"] == "n1"
     assert "程序员接单避坑" in results[0]["text"]
+    assert results[0]["title"]
+    assert results[0]["desc"]
+    assert results[0]["tags"] == []
+    assert results[0]["publish_datetime"].startswith("2026-06-28")
+    assert results[0]["engagement_count"] == 1212
     assert results[0]["url"] == "https://www.xiaohongshu.com/explore/n1"
+
+
+def test_query_dataset_returns_clean_content_fields_and_tags(tmp_path):
+    dataset_service, normalizer, query_engine = _services(tmp_path)
+    dataset = dataset_service.create_dataset(
+        name="tag-cleaning",
+        platforms=["xhs"],
+        keywords=["AI tool"],
+    )
+    raw_dir = tmp_path / "datasets" / dataset.dataset_id / "raw"
+    _write_jsonl(
+        raw_dir / "xhs_contents.jsonl",
+        [
+            {
+                "note_id": "tag1",
+                "title": "AI tool workflow",
+                "desc": "AI video tool #AI工具[话题]# #干货[话题]# AI video tool #AI工具[话题]# #干货[话题]#",
+                "liked_count": "0",
+                "likeCount": "99",
+                "collected_count": "0",
+                "collectCount": "12",
+                "source_keyword": "AI tool",
+                "publish_time": "1774432683000",
+            }
+        ],
+    )
+    normalizer.normalize_dataset(dataset.dataset_id)
+
+    results = query_engine.query_dataset(
+        dataset_id=dataset.dataset_id,
+        target="contents",
+        query="AI video",
+    )
+
+    assert len(results) == 1
+    result = results[0]
+    assert result["desc"] == "AI video tool"
+    assert result["content_text"] == "AI video tool"
+    assert result["tags"] == ["AI工具", "干货"]
+    assert "[话题]" not in result["text"]
+    assert "#AI工具" not in result["text"]
+    assert result["like_count"] == 99
+    assert result["collect_count"] == 12
+    assert result["publish_datetime"]
 
 
 def test_query_dataset_requires_normalized_database(tmp_path):

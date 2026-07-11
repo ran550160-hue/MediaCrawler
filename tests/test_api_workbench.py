@@ -1,6 +1,6 @@
 import json
 import subprocess
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -282,7 +282,7 @@ def test_cdp_browser_start_launches_detected_browser(monkeypatch, tmp_path):
         def find_available_port(self, start_port):
             return start_port
 
-        def launch_browser(self, browser_path, debug_port, headless, user_data_dir):
+        def launch_browser(self, browser_path, debug_port, headless, user_data_dir, debug_address="127.0.0.1"):
             calls.update(
                 {
                     "browser_path": browser_path,
@@ -325,6 +325,75 @@ def test_cdp_browser_start_launches_detected_browser(monkeypatch, tmp_path):
     assert calls["debug_port"] == 9333
     assert calls["headless"] is True
     assert calls["user_data_dir"] == str(tmp_path / "profile")
+
+
+def test_cdp_browser_start_uses_default_xhs_profile(monkeypatch, tmp_path):
+    calls = {}
+    default_profile = tmp_path / "browser_data" / "xhs_cdp_profile"
+
+    class FakeProcess:
+        pid = 23456
+
+        def poll(self):
+            return None
+
+    class FakeLauncher:
+        def __init__(self):
+            self.browser_process = None
+
+        def detect_browser_paths(self):
+            return [str(tmp_path / "chrome.exe")]
+
+        def find_available_port(self, start_port):
+            return start_port
+
+        def launch_browser(self, browser_path, debug_port, headless, user_data_dir, debug_address="127.0.0.1"):
+            calls["user_data_dir"] = user_data_dir
+            self.browser_process = FakeProcess()
+            return self.browser_process
+
+        def wait_for_browser_ready(self, debug_port, timeout):
+            return True
+
+        def cleanup(self):
+            pass
+
+    monkeypatch.setattr(browser_router, "DEFAULT_CDP_USER_DATA_DIR", default_profile)
+    monkeypatch.setattr(browser_router, "_active_launcher", None)
+    monkeypatch.setattr(browser_router, "_active_port", None)
+    monkeypatch.setattr(browser_router, "_active_user_data_dir", None)
+    monkeypatch.setattr(browser_router, "_is_port_open", lambda port: False)
+    monkeypatch.setattr(browser_router, "_get_cdp_version", lambda port: {})
+    monkeypatch.setattr(browser_router, "BrowserLauncher", FakeLauncher)
+    client = TestClient(app)
+
+    response = client.post("/api/browser/cdp/start", json={"port": 9222})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["user_data_dir"] == str(default_profile)
+    assert calls["user_data_dir"] == str(default_profile)
+
+
+def test_cdp_browser_open_opens_url_in_existing_browser(monkeypatch):
+    calls = {}
+    monkeypatch.setattr(browser_router, "_is_port_open", lambda port: True)
+    monkeypatch.setattr(browser_router, "_get_cdp_version", lambda port: {})
+    monkeypatch.setattr(
+        browser_router,
+        "_open_cdp_url",
+        lambda port, url: calls.update({"port": port, "url": url}) or {"id": "page-1"},
+    )
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/browser/cdp/open",
+        json={"port": 9222, "url": "https://www.xiaohongshu.com/explore"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "opened"
+    assert calls == {"port": 9222, "url": "https://www.xiaohongshu.com/explore"}
 
 
 def test_agent_xhs_search_starts_restricted_task(tmp_path, monkeypatch):
@@ -430,6 +499,192 @@ def test_agent_task_status_and_finalize_export_bundle(tmp_path, monkeypatch):
     assert "football" not in exported_contents
 
 
+def test_agent_running_task_with_output_can_partial_finalize(tmp_path, monkeypatch):
+    async def fake_stop():
+        calls.append("stop")
+        return True
+
+    class FakeProcess:
+        def poll(self):
+            return None
+
+    calls = []
+    data_root = tmp_path / "data"
+    task_data_root = data_root / "agent_runs" / "agent_xhs_partial"
+    jsonl_dir = task_data_root / "xhs" / "jsonl"
+    _write_jsonl(jsonl_dir / "search_contents_2026-07-08.jsonl", [{"note_id": "n1", "title": "AI"}])
+    monkeypatch.setattr(agent_router, "DATA_DIR", data_root)
+    monkeypatch.setattr(data_router, "DATA_DIR", data_root)
+    monkeypatch.setattr(agent_router.crawler_manager, "process", FakeProcess())
+    monkeypatch.setattr(agent_router.crawler_manager, "status", "running")
+    monkeypatch.setattr(agent_router.crawler_manager, "last_exit_code", None)
+    monkeypatch.setattr(agent_router.crawler_manager, "stop", fake_stop)
+    agent_router._tasks.clear()
+    agent_router._current_task_id = "agent_xhs_partial"
+    agent_router._tasks["agent_xhs_partial"] = {
+        "task_id": "agent_xhs_partial",
+        "status": "running",
+        "keywords": ["AI"],
+        "request": {"keywords": ["AI"], "max_contents": 20, "include_comments": False},
+        "dataset_name": "Partial Agent",
+        "description": "",
+        "data_root": str(task_data_root),
+        "started_at": datetime.now(),
+        "completed_at": None,
+        "exit_code": None,
+        "message": "running",
+    }
+    client = TestClient(app)
+
+    status_response = client.get("/api/agent/tasks/agent_xhs_partial")
+    finalize_response = client.post(
+        "/api/agent/tasks/agent_xhs_partial/finalize",
+        json={"output_dir": str(tmp_path / "datasets"), "dataset_id": "partial_bundle"},
+    )
+
+    assert status_response.status_code == 200
+    assert status_response.json()["can_finalize"] is True
+    assert status_response.json()["progress"]["contents_count"] == 1
+    assert finalize_response.status_code == 200
+    assert finalize_response.json()["partial"] is True
+    assert calls == ["stop"]
+
+
+def test_agent_cancelled_task_with_output_can_finalize(tmp_path, monkeypatch):
+    data_root = tmp_path / "data"
+    task_data_root = data_root / "agent_runs" / "agent_xhs_cancelled"
+    jsonl_dir = task_data_root / "xhs" / "jsonl"
+    _write_jsonl(jsonl_dir / "search_contents_2026-07-08.jsonl", [{"note_id": "n1", "title": "AI"}])
+    monkeypatch.setattr(agent_router, "DATA_DIR", data_root)
+    monkeypatch.setattr(data_router, "DATA_DIR", data_root)
+    agent_router._tasks.clear()
+    agent_router._current_task_id = None
+    agent_router._tasks["agent_xhs_cancelled"] = {
+        "task_id": "agent_xhs_cancelled",
+        "status": "cancelled",
+        "keywords": ["AI"],
+        "request": {"keywords": ["AI"], "max_contents": 20, "include_comments": False},
+        "dataset_name": "Cancelled Agent",
+        "description": "",
+        "data_root": str(task_data_root),
+        "started_at": datetime.now(),
+        "completed_at": datetime.now(),
+        "exit_code": None,
+        "message": "cancelled",
+    }
+    client = TestClient(app)
+
+    status_response = client.get("/api/agent/tasks/agent_xhs_cancelled")
+    finalize_response = client.post(
+        "/api/agent/tasks/agent_xhs_cancelled/finalize",
+        json={"output_dir": str(tmp_path / "datasets"), "dataset_id": "cancelled_bundle"},
+    )
+
+    assert status_response.status_code == 200
+    assert status_response.json()["status"] == "cancelled_partial"
+    assert status_response.json()["can_finalize"] is True
+    assert finalize_response.status_code == 200
+    assert finalize_response.json()["task_status"] == "cancelled_partial"
+
+
+def test_agent_status_timeout_stops_with_partial_output(tmp_path, monkeypatch):
+    async def fake_stop():
+        calls.append("stop")
+        return True
+
+    class FakeProcess:
+        def poll(self):
+            return None
+
+    calls = []
+    data_root = tmp_path / "data"
+    task_data_root = data_root / "agent_runs" / "agent_xhs_timeout"
+    jsonl_dir = task_data_root / "xhs" / "jsonl"
+    _write_jsonl(jsonl_dir / "search_contents_2026-07-08.jsonl", [{"note_id": "n1", "title": "AI"}])
+    monkeypatch.setattr(agent_router, "DATA_DIR", data_root)
+    monkeypatch.setattr(data_router, "DATA_DIR", data_root)
+    monkeypatch.setattr(agent_router.crawler_manager, "process", FakeProcess())
+    monkeypatch.setattr(agent_router.crawler_manager, "status", "running")
+    monkeypatch.setattr(agent_router.crawler_manager, "last_exit_code", None)
+    monkeypatch.setattr(agent_router.crawler_manager, "stop", fake_stop)
+    agent_router._tasks.clear()
+    agent_router._current_task_id = "agent_xhs_timeout"
+    agent_router._tasks["agent_xhs_timeout"] = {
+        "task_id": "agent_xhs_timeout",
+        "status": "running",
+        "keywords": ["AI"],
+        "request": {"keywords": ["AI"], "max_contents": 20, "include_comments": False, "timeout_seconds": 30},
+        "dataset_name": "",
+        "description": "",
+        "data_root": str(task_data_root),
+        "started_at": datetime.now() - timedelta(seconds=31),
+        "completed_at": None,
+        "exit_code": None,
+        "message": "running",
+    }
+    client = TestClient(app)
+
+    response = client.get("/api/agent/tasks/agent_xhs_timeout")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "partial_success"
+    assert payload["stop_reason"] == "timeout"
+    assert payload["can_finalize"] is True
+    assert calls == ["stop"]
+
+
+def test_agent_status_captcha_backoff_stops_with_partial_output(tmp_path, monkeypatch):
+    async def fake_stop():
+        calls.append("stop")
+        return True
+
+    class FakeProcess:
+        def poll(self):
+            return None
+
+    calls = []
+    data_root = tmp_path / "data"
+    task_data_root = data_root / "agent_runs" / "agent_xhs_captcha"
+    jsonl_dir = task_data_root / "xhs" / "jsonl"
+    _write_jsonl(jsonl_dir / "search_contents_2026-07-08.jsonl", [{"note_id": "n1", "title": "AI"}])
+    monkeypatch.setattr(agent_router, "DATA_DIR", data_root)
+    monkeypatch.setattr(data_router, "DATA_DIR", data_root)
+    monkeypatch.setattr(agent_router.crawler_manager, "process", FakeProcess())
+    monkeypatch.setattr(agent_router.crawler_manager, "status", "running")
+    monkeypatch.setattr(agent_router.crawler_manager, "last_exit_code", None)
+    monkeypatch.setattr(agent_router.crawler_manager, "stop", fake_stop)
+    monkeypatch.setattr(
+        agent_router,
+        "_recent_logs",
+        lambda limit=30: [{"level": "warning", "message": "detail api failed with 461 captcha"}] * 5,
+    )
+    agent_router._tasks.clear()
+    agent_router._current_task_id = "agent_xhs_captcha"
+    agent_router._tasks["agent_xhs_captcha"] = {
+        "task_id": "agent_xhs_captcha",
+        "status": "running",
+        "keywords": ["AI"],
+        "request": {"keywords": ["AI"], "max_contents": 20, "include_comments": False, "timeout_seconds": 1800},
+        "dataset_name": "",
+        "description": "",
+        "data_root": str(task_data_root),
+        "started_at": datetime.now(),
+        "completed_at": None,
+        "exit_code": None,
+        "message": "running",
+    }
+    client = TestClient(app)
+
+    response = client.get("/api/agent/tasks/agent_xhs_captcha")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "partial_success"
+    assert payload["stop_reason"] == "captcha_backoff"
+    assert calls == ["stop"]
+
+
 def test_agent_task_cancel_and_retry(tmp_path, monkeypatch):
     async def fake_start(request):
         calls.append(("start", request.save_data_path))
@@ -476,6 +731,8 @@ def test_agent_task_cancel_and_retry(tmp_path, monkeypatch):
     assert cancel_response.json()["status"] == "cancelled"
     assert retry_response.status_code == 200
     assert retry_response.json()["retried_from"] == "agent_xhs_cancel"
+    assert retry_response.json()["append"] is True
     assert retry_response.json()["task_id"].startswith("agent_xhs_")
     assert calls[0] == ("stop", None)
     assert calls[1][0] == "start"
+    assert calls[1][1] == str(data_root / "agent_runs" / "agent_xhs_cancel")

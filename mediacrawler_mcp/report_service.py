@@ -66,10 +66,27 @@ def _order_keyword_distribution(distribution: dict[str, int], dataset_keywords: 
     return ordered
 
 
+def _parse_tags(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(item) for item in value if str(item).strip()]
+    if not isinstance(value, str):
+        return []
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return [str(item) for item in parsed if str(item).strip()]
+
+
 def _top_contents(conn: duckdb.DuckDBPyConnection, top_n: int) -> list[dict[str, Any]]:
     rows = conn.execute(
         """
-        SELECT content_id, title, author_name, url, source_keyword,
+        SELECT content_id, title, author_name, url, source_keyword, tags,
+               CAST(publish_datetime AS VARCHAR) AS publish_datetime,
                like_count, collect_count, comment_count, share_count, engagement_count
         FROM contents
         ORDER BY engagement_count DESC, content_id ASC
@@ -77,8 +94,24 @@ def _top_contents(conn: duckdb.DuckDBPyConnection, top_n: int) -> list[dict[str,
         """,
         [top_n],
     ).fetchall()
-    columns = ("content_id", "title", "author_name", "url", "source_keyword", "like_count", "collect_count", "comment_count", "share_count", "engagement_count")
-    return [dict(zip(columns, row)) for row in rows]
+    columns = (
+        "content_id",
+        "title",
+        "author_name",
+        "url",
+        "source_keyword",
+        "tags",
+        "publish_datetime",
+        "like_count",
+        "collect_count",
+        "comment_count",
+        "share_count",
+        "engagement_count",
+    )
+    results = [dict(zip(columns, row)) for row in rows]
+    for result in results:
+        result["tags"] = _parse_tags(result.get("tags"))
+    return results
 
 
 def _top_comments(conn: duckdb.DuckDBPyConnection, top_n: int) -> list[dict[str, Any]]:
@@ -128,6 +161,77 @@ def _word_frequency(conn: duckdb.DuckDBPyConnection, top_n: int = 50) -> dict[st
     return {word: int(count) for word, count in counter.most_common(top_n)}
 
 
+def _keyword_stopwords(values: list[str]) -> set[str]:
+    stopwords: set[str] = set()
+    for value in values:
+        text = str(value or "").strip().lower()
+        if not text:
+            continue
+        stopwords.add(text)
+        stopwords.update(_comment_tokens(text))
+    return stopwords
+
+
+def _content_word_frequency(
+    conn: duckdb.DuckDBPyConnection,
+    dataset_keywords: list[str],
+    top_n: int = 50,
+) -> dict[str, int]:
+    rows = conn.execute(
+        """
+        SELECT title, "desc", content_text, tags, source_keyword
+        FROM contents
+        """
+    ).fetchall()
+    source_keywords = [str(row[4] or "") for row in rows]
+    excluded = COMMENT_STOPWORDS | _keyword_stopwords(dataset_keywords + source_keywords)
+    counter: Counter[str] = Counter()
+    for title, desc, content_text, tags, _source_keyword in rows:
+        tag_text = " ".join(_parse_tags(tags))
+        text = " ".join(str(value or "") for value in (title, desc, content_text, tag_text))
+        for token in _comment_tokens(text):
+            if token in excluded:
+                continue
+            counter[token] += 1
+    return {word: int(count) for word, count in counter.most_common(top_n)}
+
+
+def _interaction_warnings(conn: duckdb.DuckDBPyConnection, limit: int = 20) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT content_id, title, source_keyword, like_count, collect_count,
+               comment_count, share_count, engagement_count
+        FROM contents
+        WHERE engagement_count >= 10000
+          AND (like_count = 0 OR collect_count = 0)
+        ORDER BY engagement_count DESC, content_id ASC
+        LIMIT ?
+        """,
+        [limit],
+    ).fetchall()
+    columns = (
+        "content_id",
+        "title",
+        "source_keyword",
+        "like_count",
+        "collect_count",
+        "comment_count",
+        "share_count",
+        "engagement_count",
+    )
+    warnings = []
+    for row in rows:
+        warning = dict(zip(columns, row))
+        missing = []
+        if int(warning["like_count"] or 0) == 0:
+            missing.append("like_count")
+        if int(warning["collect_count"] or 0) == 0:
+            missing.append("collect_count")
+        warning["warning"] = f"High engagement with zero {', '.join(missing)}"
+        warnings.append(warning)
+    return warnings
+
+
 def _ad_candidates(conn: duckdb.DuckDBPyConnection, limit: int = 20) -> list[dict[str, Any]]:
     clauses = " OR ".join(["concat_ws(' ', title, \"desc\", content_text) LIKE ?" for _ in AD_KEYWORDS])
     params = [f"%{keyword}%" for keyword in AD_KEYWORDS]
@@ -159,6 +263,7 @@ def _markdown_table(rows: list[dict[str, Any]], columns: list[str]) -> str:
 
 def _write_markdown(path: Path, summary: dict[str, Any]) -> None:
     metrics = summary["metrics"]
+    content_keywords = summary.get("content_word_freq", {})
     lines = [
         f"# {summary['dataset']['name']} 报告",
         "",
@@ -176,9 +281,13 @@ def _write_markdown(path: Path, summary: dict[str, Any]) -> None:
         "",
         *[f"- {key}: {value}" for key, value in summary["keyword_distribution"].items()],
         "",
+        "## 内容高频词",
+        "",
+        *[f"- {key}: {value}" for key, value in list(content_keywords.items())[:20]],
+        "",
         "## 高互动内容",
         "",
-        _markdown_table(summary["top_contents"], ["content_id", "title", "source_keyword", "engagement_count", "url"]),
+        _markdown_table(summary["top_contents"], ["content_id", "title", "source_keyword", "publish_datetime", "engagement_count", "url"]),
         "",
         "## 高赞评论",
         "",
@@ -187,6 +296,10 @@ def _write_markdown(path: Path, summary: dict[str, Any]) -> None:
         "## 疑似广告或引流候选",
         "",
         _markdown_table(summary["ad_candidates"], ["content_id", "title", "source_keyword", "engagement_count", "url"]),
+        "",
+        "## 数据质量提示",
+        "",
+        _markdown_table(summary.get("interaction_warnings", []), ["content_id", "title", "source_keyword", "like_count", "collect_count", "engagement_count", "warning"]),
     ]
     path.write_text("\n".join(lines), encoding="utf-8")
 
@@ -196,6 +309,10 @@ def _write_html(path: Path, summary: dict[str, Any]) -> None:
     keyword_items = "".join(
         f"<li>{_escape(key)}: {int(value)}</li>"
         for key, value in summary["keyword_distribution"].items()
+    ) or "<li>暂无数据</li>"
+    content_keyword_items = "".join(
+        f"<li>{_escape(key)}: {int(value)}</li>"
+        for key, value in list(summary.get("content_word_freq", {}).items())[:20]
     ) or "<li>暂无数据</li>"
 
     def table(rows: list[dict[str, Any]], columns: list[str]) -> str:
@@ -234,12 +351,16 @@ def _write_html(path: Path, summary: dict[str, Any]) -> None:
   </section>
   <h2>关键词分布</h2>
   <ul>{keyword_items}</ul>
+  <h2>内容高频词</h2>
+  <ul>{content_keyword_items}</ul>
   <h2>高互动内容</h2>
-  {table(summary['top_contents'], ['content_id', 'title', 'source_keyword', 'engagement_count', 'url'])}
+  {table(summary['top_contents'], ['content_id', 'title', 'source_keyword', 'publish_datetime', 'engagement_count', 'url'])}
   <h2>高赞评论</h2>
   {table(summary['top_comments'], ['comment_id', 'content_id', 'comment_text', 'source_keyword', 'like_count'])}
   <h2>疑似广告或引流候选</h2>
   {table(summary['ad_candidates'], ['content_id', 'title', 'source_keyword', 'engagement_count', 'url'])}
+  <h2>数据质量提示</h2>
+  {table(summary.get('interaction_warnings', []), ['content_id', 'title', 'source_keyword', 'like_count', 'collect_count', 'engagement_count', 'warning'])}
 </body>
 </html>
 """,
@@ -296,7 +417,9 @@ class ReportService:
                 "keyword_distribution": _order_keyword_distribution(_keyword_distribution(conn), dataset_keywords),
                 "top_contents": _top_contents(conn, top_n),
                 "top_comments": _top_comments(conn, top_n),
+                "content_word_freq": _content_word_frequency(conn, dataset_keywords),
                 "comment_word_freq": _word_frequency(conn),
+                "interaction_warnings": _interaction_warnings(conn),
                 "ad_candidates": _ad_candidates(conn),
                 "outputs": {
                     "summary_json_path": str(summary_json_path),
@@ -328,8 +451,9 @@ class ReportService:
             "summary": {
                 "content_count": metrics["content_count"],
                 "comment_count": metrics["comment_count"],
-                "top_keywords": list(summary["keyword_distribution"].keys())[:10],
+                "top_keywords": list(summary["content_word_freq"].keys())[:10],
                 "high_engagement_posts": summary["top_contents"][:5],
+                "interaction_warnings": summary["interaction_warnings"][:5],
             },
         }
 

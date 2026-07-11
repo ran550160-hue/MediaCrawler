@@ -468,11 +468,19 @@ def check_local_workbench(base_url: str = "http://127.0.0.1:8080") -> dict[str, 
 def ensure_cdp_browser(
     port: int = 9222,
     headless: bool = False,
+    user_data_dir: str = "",
+    open_xhs: bool = True,
     base_url: str = "http://127.0.0.1:8080",
 ) -> dict[str, Any]:
     """Ensure a local Chrome/Edge CDP browser is reachable."""
     try:
-        return DesktopAgentClient(base_url=base_url).ensure_cdp_browser(port=port, headless=headless)
+        start_url = "https://www.xiaohongshu.com/explore" if open_xhs else ""
+        return DesktopAgentClient(base_url=base_url).ensure_cdp_browser(
+            port=port,
+            headless=headless,
+            user_data_dir=user_data_dir,
+            start_url=start_url,
+        )
     except McpAppError as exc:
         return exc.to_result()
     except Exception as exc:  # pragma: no cover - safety boundary for MCP tools
@@ -488,6 +496,7 @@ def start_local_xhs_search(
     include_sub_comments: bool = False,
     cdp_debug_port: int = 9222,
     headless: bool = False,
+    timeout_seconds: int = 1800,
     base_url: str = "http://127.0.0.1:8080",
 ) -> dict[str, Any]:
     """Start a restricted Windows-local XHS search task."""
@@ -500,6 +509,7 @@ def start_local_xhs_search(
             include_sub_comments=include_sub_comments,
             cdp_debug_port=cdp_debug_port,
             headless=headless,
+            timeout_seconds=timeout_seconds,
         )
     except McpAppError as exc:
         return exc.to_result()
@@ -546,11 +556,12 @@ def cancel_local_xhs_search(
 
 def retry_local_xhs_search(
     task_id: str,
+    append: bool = True,
     base_url: str = "http://127.0.0.1:8080",
 ) -> dict[str, Any]:
-    """Retry a Windows-local XHS search task with a fresh task output directory."""
+    """Retry a Windows-local XHS search task, appending to the previous output directory by default."""
     try:
-        return DesktopAgentClient(base_url=base_url).retry_task(task_id)
+        return DesktopAgentClient(base_url=base_url).retry_task(task_id, append=append)
     except McpAppError as exc:
         return exc.to_result()
     except Exception as exc:  # pragma: no cover - safety boundary for MCP tools
@@ -564,12 +575,18 @@ def finalize_local_xhs_search(
     generate_report: bool = True,
     dataset_name: str = "",
     description: str = "",
+    force: bool = False,
     base_url: str = "http://127.0.0.1:8080",
 ) -> dict[str, Any]:
     """Finalize a Windows-local XHS search into a registered MCP dataset."""
     try:
         client = DesktopAgentClient(base_url=base_url)
-        finalized = client.finalize_task(task_id, dataset_name=dataset_name, description=description)
+        finalized = client.finalize_task(
+            task_id,
+            dataset_name=dataset_name,
+            description=description,
+            force=force,
+        )
         dataset_dir = finalized.get("dataset_dir")
         if not dataset_dir:
             raise McpAppError(ErrorCode.INVALID_ARGUMENT, "Local finalize did not return dataset_dir")

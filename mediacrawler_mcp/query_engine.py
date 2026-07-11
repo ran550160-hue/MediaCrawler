@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -11,7 +12,7 @@ from mediacrawler_mcp.storage import Storage
 
 VALID_TARGETS = {"contents", "comments"}
 VALID_SORTS = {
-    "contents": {"engagement_count", "like_count", "comment_count", "publish_time"},
+    "contents": {"engagement_count", "like_count", "comment_count", "collect_count", "share_count", "publish_time"},
     "comments": {"like_count", "publish_time"},
 }
 
@@ -74,7 +75,7 @@ class QueryEngine:
         with duckdb.connect(str(duckdb_path), read_only=True) as conn:
             rows = conn.execute(sql, params).fetchall()
             columns = [desc[0] for desc in conn.description]
-        return [dict(zip(columns, row)) for row in rows]
+        return [_coerce_result_row(dict(zip(columns, row))) for row in rows]
 
     @staticmethod
     def _build_query(
@@ -100,15 +101,29 @@ class QueryEngine:
             text_expr = "comment_text"
             select = """
                 platform, source_keyword, content_id, comment_id,
-                comment_text AS text, like_count, publish_time,
+                comment_text AS text,
+                like_count,
+                publish_time,
+                CAST(publish_datetime AS VARCHAR) AS publish_datetime,
                 NULL AS url
             """
         else:
-            text_expr = "concat_ws(' ', title, \"desc\", content_text)"
+            text_expr = "concat_ws(' ', title, \"desc\", content_text, tags)"
             select = """
                 platform, source_keyword, content_id, NULL AS comment_id,
-                concat_ws(' ', title, "desc", content_text) AS text,
-                like_count, publish_time, url
+                title,
+                "desc",
+                content_text,
+                tags,
+                concat_ws(' ', title, "desc", content_text, tags) AS text,
+                like_count,
+                collect_count,
+                comment_count,
+                share_count,
+                engagement_count,
+                publish_time,
+                CAST(publish_datetime AS VARCHAR) AS publish_datetime,
+                url
             """
 
         for token in [part for part in query.split() if part.strip()]:
@@ -126,3 +141,21 @@ class QueryEngine:
             OFFSET ?
         """
         return sql, params
+
+
+def _coerce_result_row(row: dict[str, Any]) -> dict[str, Any]:
+    tags = row.get("tags")
+    if isinstance(tags, str):
+        try:
+            parsed = json.loads(tags)
+        except json.JSONDecodeError:
+            parsed = []
+        row["tags"] = parsed if isinstance(parsed, list) else []
+    if "content_text" in row:
+        parts = []
+        for value in (row.get("title"), row.get("desc"), row.get("content_text"), " ".join(row.get("tags") or [])):
+            text = str(value or "").strip()
+            if text and text not in parts:
+                parts.append(text)
+        row["text"] = " ".join(parts)
+    return row

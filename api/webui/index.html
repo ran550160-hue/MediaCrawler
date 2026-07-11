@@ -27,8 +27,14 @@
           </div>
           <div class="cdp-actions">
             <button id="startCdpBtn" type="button">启动 CDP 浏览器</button>
+            <button id="openXhsBtn" type="button">打开小红书</button>
             <span id="cdpStatusText" class="muted">端口 9222</span>
           </div>
+          <label class="cdp-profile">
+            CDP Profile
+            <input id="cdpUserDataDir" type="text" placeholder="默认 browser_data\\xhs_cdp_profile" />
+            <small id="cdpProfileText" class="muted">用于保存小红书登录态，第一次扫码后会复用。</small>
+          </label>
           <div class="agent-hint">
             <strong>本地 Agent</strong>
             <span id="agentBaseUrl">Hermes/WSL base URL: http://127.0.0.1:8080</span>

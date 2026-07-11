@@ -2,6 +2,8 @@ param(
     [int]$Port = 8080,
     [int]$CdpPort = 9222,
     [switch]$Headless,
+    [string]$CdpUserDataDir = "browser_data\xhs_cdp_profile",
+    [string]$StartUrl = "https://www.xiaohongshu.com/explore",
     [string]$AgentToken = "",
     [string]$UvProjectEnvironment = ".tmp\uv-agent-venv"
 )
@@ -51,12 +53,18 @@ if (-not (Wait-Health -Url $baseUrl)) {
 $body = @{
     port = $CdpPort
     headless = [bool]$Headless
+    user_data_dir = $CdpUserDataDir
+    start_url = $StartUrl
 } | ConvertTo-Json
 
 $cdp = Invoke-RestMethod -Uri "$baseUrl/api/browser/cdp/start" -Method Post `
     -ContentType "application/json" -Body $body -TimeoutSec 60
 
 Write-Host "CDP status: $($cdp.status) port=$($cdp.port)"
+Write-Host "CDP profile: $($cdp.user_data_dir)"
+if ($StartUrl) {
+    Write-Host "Opened: $StartUrl"
+}
 Write-Host ""
 Write-Host "Hermes/WSL base URL:"
 Write-Host "  $baseUrl"

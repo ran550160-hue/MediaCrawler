@@ -101,7 +101,9 @@ def test_generate_report_writes_markdown_html_summary_and_report_row(tmp_path):
     assert result["report_id"].startswith("report_")
     assert result["summary"]["content_count"] == 2
     assert result["summary"]["comment_count"] == 2
-    assert result["summary"]["top_keywords"] == ["程序员接单", "AI编程副业"]
+    assert result["summary"]["top_keywords"]
+    assert "程序员接单" not in result["summary"]["top_keywords"]
+    assert "AI编程副业" not in result["summary"]["top_keywords"]
 
     report_md = Path(result["report_md_path"])
     report_html = Path(result["report_html_path"])
@@ -116,7 +118,11 @@ def test_generate_report_writes_markdown_html_summary_and_report_row(tmp_path):
     assert summary["metrics"]["author_count"] == 2
     assert summary["metrics"]["comment_user_count"] == 2
     assert summary["keyword_distribution"] == {"程序员接单": 1, "AI编程副业": 1}
+    assert summary["content_word_freq"]
+    assert result["summary"]["top_keywords"] == list(summary["content_word_freq"].keys())[:10]
     assert summary["top_contents"][0]["content_id"] == "n1"
+    assert "publish_datetime" in summary["top_contents"][0]
+    assert "tags" in summary["top_contents"][0]
     assert summary["top_comments"][0]["comment_id"] == "c1"
     assert "最怕客户不付款" not in summary["comment_word_freq"]
     assert {"客户", "付款"} & set(summary["comment_word_freq"])

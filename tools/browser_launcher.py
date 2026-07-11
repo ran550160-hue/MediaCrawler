@@ -117,7 +117,7 @@ class BrowserLauncher:
         raise RuntimeError(f"Cannot find available port, tried {start_port} to {port-1}")
 
     def launch_browser(self, browser_path: str, debug_port: int, headless: bool = False,
-                      user_data_dir: Optional[str] = None) -> subprocess.Popen:
+                      user_data_dir: Optional[str] = None, debug_address: str = "127.0.0.1") -> subprocess.Popen:
         """
         Launch browser process
         """
@@ -125,7 +125,7 @@ class BrowserLauncher:
         args = [
             browser_path,
             f"--remote-debugging-port={debug_port}",
-            "--remote-debugging-address=0.0.0.0",  # Allow remote access
+            f"--remote-debugging-address={debug_address}",
             "--no-first-run",
             "--no-default-browser-check",
             "--disable-background-timer-throttling",
@@ -162,6 +162,7 @@ class BrowserLauncher:
 
         utils.logger.info(f"[BrowserLauncher] Launching browser: {browser_path}")
         utils.logger.info(f"[BrowserLauncher] Debug port: {debug_port}")
+        utils.logger.info(f"[BrowserLauncher] Debug address: {debug_address}")
         utils.logger.info(f"[BrowserLauncher] Headless mode: {headless}")
 
         try:

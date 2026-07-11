@@ -105,7 +105,14 @@ class CDPBrowserStartRequest(BaseModel):
     headless: bool = False
     browser_path: str = ""
     user_data_dir: str = ""
+    start_url: str = ""
     timeout_seconds: int = Field(default=30, ge=1, le=300)
+
+
+class CDPBrowserOpenRequest(BaseModel):
+    """Open a URL in the local CDP browser."""
+    port: int = Field(default=9222, ge=1, le=65535)
+    url: str = "https://www.xiaohongshu.com/explore"
 
 
 class AgentXHSSearchRequest(BaseModel):
@@ -118,6 +125,7 @@ class AgentXHSSearchRequest(BaseModel):
     start_page: int = Field(default=1, ge=1, le=100)
     cdp_debug_port: int = Field(default=9222, ge=1, le=65535)
     headless: bool = False
+    timeout_seconds: int = Field(default=1800, ge=30, le=21600)
     dataset_name: str = ""
     description: str = ""
 
@@ -128,6 +136,7 @@ class AgentTaskFinalizeRequest(BaseModel):
     description: str = ""
     output_dir: str = "datasets"
     dataset_id: Optional[str] = None
+    force: bool = False
 
 
 class CrawlerStatusResponse(BaseModel):

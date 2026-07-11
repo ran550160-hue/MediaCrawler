@@ -9,6 +9,7 @@ const state = {
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => Array.from(document.querySelectorAll(selector));
+const XHS_URL = "https://www.xiaohongshu.com/explore";
 
 function setStatusText(message) {
   $("#statusText").textContent = message;
@@ -151,14 +152,26 @@ async function refreshCdpStatus() {
     $("#cdpStatusText").textContent = status.reachable
       ? `CDP 已可用：${status.port}`
       : `CDP 未连接：${status.port}`;
+    renderCdpProfile(status);
   } catch (error) {
     $("#cdpStatusText").textContent = `CDP 检测失败：${error.message}`;
   }
 }
 
+function renderCdpProfile(status) {
+  const profile = status.user_data_dir || status.default_user_data_dir || "";
+  if (profile && !$("#cdpUserDataDir").value.trim()) {
+    $("#cdpUserDataDir").value = profile;
+  }
+  $("#cdpProfileText").textContent = profile
+    ? `当前登录态目录：${profile}`
+    : "用于保存小红书登录态，第一次扫码后会复用。";
+}
+
 async function startCdpBrowser() {
   const form = $("#crawlerForm");
   const port = Number(form.elements.cdp_debug_port.value || 9222);
+  const userDataDir = $("#cdpUserDataDir").value.trim();
   $("#startCdpBtn").disabled = true;
   $("#cdpStatusText").textContent = "启动中";
   try {
@@ -167,10 +180,13 @@ async function startCdpBrowser() {
       body: JSON.stringify({
         port,
         headless: form.elements.headless.checked,
+        user_data_dir: userDataDir,
+        start_url: XHS_URL,
       }),
     });
     form.elements.cdp_debug_port.value = result.port;
     $("#cdpStatusText").textContent = `${result.message || "CDP 浏览器已启动"}`;
+    renderCdpProfile(result);
     addLog(result.message || `CDP browser ready on ${result.port}`, "success");
     await checkEnvironment();
   } catch (error) {
@@ -178,6 +194,25 @@ async function startCdpBrowser() {
     addLog(error.message, "error");
   } finally {
     $("#startCdpBtn").disabled = false;
+  }
+}
+
+async function openXhsPage() {
+  const port = Number($("#crawlerForm").elements.cdp_debug_port.value || 9222);
+  $("#openXhsBtn").disabled = true;
+  try {
+    const result = await fetchJson("/api/browser/cdp/open", {
+      method: "POST",
+      body: JSON.stringify({ port, url: XHS_URL }),
+    });
+    $("#cdpStatusText").textContent = result.message || "已打开小红书";
+    renderCdpProfile(result);
+    addLog(result.message || "Opened Xiaohongshu in CDP browser", "success");
+  } catch (error) {
+    $("#cdpStatusText").textContent = "打开失败";
+    addLog(error.message, "error");
+  } finally {
+    $("#openXhsBtn").disabled = false;
   }
 }
 
@@ -431,6 +466,7 @@ function bindEvents() {
   $("#stopBtn").addEventListener("click", stopCrawler);
   $("#checkEnvBtn").addEventListener("click", checkEnvironment);
   $("#startCdpBtn").addEventListener("click", startCdpBrowser);
+  $("#openXhsBtn").addEventListener("click", openXhsPage);
   $("#refreshDataBtn").addEventListener("click", loadFiles);
   $("#clearLogsBtn").addEventListener("click", () => {
     $("#logStream").textContent = "";

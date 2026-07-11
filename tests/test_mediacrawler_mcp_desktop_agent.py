@@ -60,7 +60,41 @@ def test_desktop_agent_tools_delegate_to_local_workbench(monkeypatch):
     assert calls[0][0] == "start"
     assert calls[0][1]["keywords"] == ["AI"]
     assert calls[0][1]["max_contents"] == 5
+    assert calls[0][1]["timeout_seconds"] == 1800
     assert calls[1] == ("status", "agent_xhs_1", False, True, 10)
+
+
+def test_ensure_cdp_browser_passes_profile_and_opens_xhs(monkeypatch):
+    calls = []
+
+    class FakeDesktopAgentClient:
+        def __init__(self, base_url=None):
+            pass
+
+        def ensure_cdp_browser(self, port=9222, headless=False, user_data_dir="", start_url=""):
+            calls.append(
+                {
+                    "port": port,
+                    "headless": headless,
+                    "user_data_dir": user_data_dir,
+                    "start_url": start_url,
+                }
+            )
+            return {"status": "success", "user_data_dir": user_data_dir, "opened": {"url": start_url}}
+
+    monkeypatch.setattr(server, "DesktopAgentClient", FakeDesktopAgentClient)
+
+    result = server.ensure_cdp_browser(port=9333, headless=True, user_data_dir="/mnt/d/xhs-profile")
+
+    assert result["status"] == "success"
+    assert calls == [
+        {
+            "port": 9333,
+            "headless": True,
+            "user_data_dir": "/mnt/d/xhs-profile",
+            "start_url": "https://www.xiaohongshu.com/explore",
+        }
+    ]
 
 
 def test_desktop_agent_cancel_and_retry_delegate_to_local_workbench(monkeypatch):
@@ -74,9 +108,9 @@ def test_desktop_agent_cancel_and_retry_delegate_to_local_workbench(monkeypatch)
             calls.append(("cancel", task_id))
             return {"task_id": task_id, "status": "cancelled"}
 
-        def retry_task(self, task_id):
-            calls.append(("retry", task_id))
-            return {"retried_from": task_id, "task_id": "agent_xhs_2", "status": "running"}
+        def retry_task(self, task_id, append=True):
+            calls.append(("retry", task_id, append))
+            return {"retried_from": task_id, "append": append, "task_id": "agent_xhs_2", "status": "running"}
 
     monkeypatch.setattr(server, "DesktopAgentClient", FakeDesktopAgentClient)
 
@@ -85,7 +119,8 @@ def test_desktop_agent_cancel_and_retry_delegate_to_local_workbench(monkeypatch)
 
     assert cancelled["status"] == "cancelled"
     assert retried["task_id"] == "agent_xhs_2"
-    assert calls == [("cancel", "agent_xhs_1"), ("retry", "agent_xhs_1")]
+    assert retried["append"] is True
+    assert calls == [("cancel", "agent_xhs_1"), ("retry", "agent_xhs_1", True)]
 
 
 def test_finalize_local_xhs_search_registers_normalizes_and_reports(monkeypatch):
@@ -93,7 +128,8 @@ def test_finalize_local_xhs_search_registers_normalizes_and_reports(monkeypatch)
         def __init__(self, base_url=None):
             pass
 
-        def finalize_task(self, task_id, dataset_name="", description=""):
+        def finalize_task(self, task_id, dataset_name="", description="", force=False):
+            assert force is False
             return {
                 "dataset_dir": "/mnt/d/WorkSpace/MediaCrawler/datasets/agent_bundle",
                 "dataset_id": "agent_bundle",
