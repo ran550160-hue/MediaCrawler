@@ -273,7 +273,7 @@ def query_dataset(
 def generate_report(
     dataset_id: str,
     report_type: str = "topic_research",
-    top_n: int = 20,
+    top_n: int = 10,
 ) -> dict[str, Any]:
     """Generate topic_research, generic, or no report for a normalized dataset."""
     try:

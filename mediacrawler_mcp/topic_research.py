@@ -27,6 +27,15 @@ NEGATED_NEGATIVE_MARKERS = ("不是很贵", "不贵", "没那么贵")
 TEXT_NORMALIZE_PATTERN = re.compile(r"[^0-9a-zA-Z\u4e00-\u9fff]+")
 NEAR_DUPLICATE_THRESHOLD = 0.92
 MAX_UNIQUE_TEXTS_CHECKED = 300
+REQUIRED_CONTENT_COLUMNS = {
+    "collection_task_id",
+    "content_type",
+    "interaction_field_status",
+    "interaction_approximate_fields",
+    "interaction_parse_error_fields",
+}
+REQUIRED_COMMENT_COLUMNS = {"content_id", "comment_id", "parent_comment_id", "comment_text"}
+OUTDATED_SCHEMA_MESSAGE = "Dataset schema is outdated. Run normalize_dataset(dataset_id, force=True) before topic research."
 
 
 def normalize_analysis_text(value: Any) -> str:
@@ -294,6 +303,7 @@ class TopicResearchService:
             raise McpAppError(ErrorCode.REPORT_FAILED, "Dataset is not normalized", "Call normalize_dataset before topic research")
         manifest = self._read_manifest(dataset_dir / "dataset.json")
         with duckdb.connect(str(database_path), read_only=True) as conn:
+            self._validate_schema(conn)
             contents = self._rows(conn, "SELECT * FROM contents")
             comments = self._rows(conn, "SELECT * FROM comments")
         summary = {
@@ -328,6 +338,17 @@ class TopicResearchService:
         cursor = conn.execute(query)
         columns = [item[0] for item in cursor.description]
         return [dict(zip(columns, values)) for values in cursor.fetchall()]
+
+    @staticmethod
+    def _validate_schema(conn: duckdb.DuckDBPyConnection) -> None:
+        def columns(table: str) -> set[str]:
+            try:
+                return {str(row[1]) for row in conn.execute(f"PRAGMA table_info('{table}')").fetchall()}
+            except duckdb.Error:
+                return set()
+
+        if REQUIRED_CONTENT_COLUMNS - columns("contents") or REQUIRED_COMMENT_COLUMNS - columns("comments"):
+            raise McpAppError(ErrorCode.REPORT_FAILED, OUTDATED_SCHEMA_MESSAGE)
 
     @staticmethod
     def _read_manifest(path: Path) -> dict[str, Any]:

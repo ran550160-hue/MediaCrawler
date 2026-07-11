@@ -3,12 +3,14 @@ import importlib.util
 from pathlib import Path
 
 import duckdb
+import pytest
 
 from mediacrawler_mcp import server
 from mediacrawler_mcp.config import McpConfig
 from mediacrawler_mcp.dataset_bundle_exporter import DatasetBundleExporter
 from mediacrawler_mcp.dataset_importer import DatasetImporter
 from mediacrawler_mcp.dataset_service import DatasetService
+from mediacrawler_mcp.errors import ErrorCode, McpAppError
 from mediacrawler_mcp.normalizer import DatasetNormalizer
 from mediacrawler_mcp.normalizer import _number_with_status
 from mediacrawler_mcp.storage import Storage
@@ -230,6 +232,22 @@ def test_empty_ids_do_not_merge_distinct_anomalies(tmp_path):
     dataset, research = _dataset_with_rows(tmp_path, contents, [])
     quality = research.generate_topic_research_report(dataset.dataset_id)["summary"]["data_quality"]
     assert quality["anomaly_sample_count"] == 2
+
+
+def test_outdated_duckdb_schema_requires_force_renormalization_before_topic_research(tmp_path):
+    _, _, datasets, _, research = _services(tmp_path)
+    dataset = datasets.create_dataset(name="旧 schema", platforms=["xhs"], keywords=["AI"])
+    database = Path(dataset.dataset_dir) / "analysis.duckdb"
+    with duckdb.connect(str(database)) as conn:
+        conn.execute("CREATE TABLE contents (dataset_id TEXT, content_id TEXT, engagement_count BIGINT)")
+        conn.execute("CREATE TABLE comments (content_id TEXT, comment_id TEXT, comment_text TEXT)")
+        conn.execute("INSERT INTO contents VALUES ('old', 'n1', 0)")
+
+    with pytest.raises(McpAppError) as exc_info:
+        research.generate_topic_research_report(dataset.dataset_id)
+
+    assert exc_info.value.code == ErrorCode.REPORT_FAILED
+    assert exc_info.value.message == "Dataset schema is outdated. Run normalize_dataset(dataset_id, force=True) before topic research."
 
 
 def test_topic_analysis_is_order_independent_and_evidence_strength_is_rule_based():

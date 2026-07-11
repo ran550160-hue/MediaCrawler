@@ -90,6 +90,11 @@ def test_start_collection_schema_defaults_to_remote_verify():
     assert signature.parameters["skip_preflight"].default is False
 
 
+def test_report_entry_schemas_default_to_topic_research_top_n_ten():
+    assert inspect.signature(server.generate_report).parameters["top_n"].default == 10
+    assert inspect.signature(server.generate_topic_research_report).parameters["top_n"].default == 10
+
+
 def test_get_login_status_schema_exposes_permission_verify():
     signature = inspect.signature(server.get_login_status)
 
