@@ -258,6 +258,26 @@ def test_topic_analysis_is_order_independent_and_evidence_strength_is_rule_based
     assert calculate_evidence_strength(0, 0, 1)["level"] == "low"
 
 
+@pytest.mark.parametrize(
+    ("tags", "source_keyword", "expected"),
+    [
+        (["00:13", "有效标签"], "fallback", "有效标签"),
+        (["01:25:30", "有效标签"], "fallback", "有效标签"),
+        (["123", "有效标签"], "fallback", "有效标签"),
+        (["GPT-5"], "fallback", "GPT-5"),
+        (["3D打印"], "fallback", "3D打印"),
+        (["2026世界杯"], "fallback", "2026世界杯"),
+        (["00:13", "123"], "fallback", "fallback"),
+    ],
+)
+def test_topic_grouping_ignores_only_numeric_or_duration_like_tags(tags, source_keyword, expected):
+    contents = [{"content_id": "n1", "tags": json.dumps(tags, ensure_ascii=False), "source_keyword": source_keyword}]
+
+    topic = build_topic_analysis(contents, [], "ds")["topics"][0]
+
+    assert topic["name"] == expected
+
+
 def test_finalize_local_xhs_search_generates_real_topic_report_after_mocked_local_edge(tmp_path, monkeypatch):
     contents, comments = _one_post_three_comments_rows()
     source_dir = tmp_path / "source"

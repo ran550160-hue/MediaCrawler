@@ -25,6 +25,7 @@ INTENT_MARKERS = ("想买", "购买", "下单", "入手", "求链接", "哪里�
 NEGATED_POSITIVE_MARKERS = ("不推荐", "不太好用", "不怎么好用", "不好用", "不值得")
 NEGATED_NEGATIVE_MARKERS = ("不是很贵", "不贵", "没那么贵")
 TEXT_NORMALIZE_PATTERN = re.compile(r"[^0-9a-zA-Z\u4e00-\u9fff]+")
+INVALID_TOPIC_TAG_PATTERN = re.compile(r"^(?:\d+|\d{1,2}:\d{2}(?::\d{2})?)$")
 NEAR_DUPLICATE_THRESHOLD = 0.92
 MAX_UNIQUE_TEXTS_CHECKED = 300
 REQUIRED_CONTENT_COLUMNS = {
@@ -113,7 +114,7 @@ def _first_topic(content: dict[str, Any]) -> str:
     if isinstance(tags, list):
         for tag in tags:
             text = str(tag or "").strip()
-            if text:
+            if text and not INVALID_TOPIC_TAG_PATTERN.fullmatch(text):
                 return text
     return str(content.get("source_keyword") or "未分类").strip() or "未分类"
 
