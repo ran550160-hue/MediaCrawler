@@ -23,6 +23,9 @@ class DatasetBundleExporter:
         contents_path: str | Path | None = None,
         comments_path: str | Path | None = None,
         dataset_id: str | None = None,
+        collection_task_id: str | None = None,
+        collection_started_at: str | None = None,
+        collection_completed_at: str | None = None,
     ) -> dict[str, Any]:
         name = (name or "").strip()
         keywords = [keyword.strip() for keyword in keywords or [] if keyword and keyword.strip()]
@@ -99,6 +102,9 @@ class DatasetBundleExporter:
                 "data_root": str(Path(data_root).expanduser()),
                 "contents_source": str(contents_source) if contents_source else None,
                 "comments_source": str(comments_source) if comments_source else None,
+                "collection_task_id": collection_task_id or None,
+                "collection_started_at": collection_started_at or None,
+                "collection_completed_at": collection_completed_at or None,
             },
             "dataset_dir": str(bundle_dir),
             "created_at": now,

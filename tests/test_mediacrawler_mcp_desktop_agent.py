@@ -155,8 +155,9 @@ def test_finalize_local_xhs_search_registers_normalizes_and_reports(monkeypatch)
         def __init__(self, storage):
             pass
 
-        def generate_report(self, dataset_id):
+        def generate_report(self, dataset_id, report_type="topic_research"):
             assert dataset_id == "agent_bundle"
+            assert report_type == "generic"
             return {"report_md_path": "/tmp/report.md"}
 
     monkeypatch.setattr(server, "DesktopAgentClient", FakeDesktopAgentClient)
@@ -165,11 +166,18 @@ def test_finalize_local_xhs_search_registers_normalizes_and_reports(monkeypatch)
     monkeypatch.setattr(server, "DatasetNormalizer", FakeNormalizer)
     monkeypatch.setattr(server, "ReportService", FakeReportService)
 
-    result = server.finalize_local_xhs_search("agent_xhs_1")
+    result = server.finalize_local_xhs_search("agent_xhs_1", report_type="generic")
 
     assert result["status"] == "success"
     assert result["dataset_id"] == "agent_bundle"
     assert result["registered"]["dataset_id"] == "agent_bundle"
     assert result["normalized"] == {"content_count": 1, "comment_count": 1}
     assert result["report"] == {"report_md_path": "/tmp/report.md"}
+    assert result["report_type"] == "generic"
     assert result["preview"] == [{"path": "/mnt/d/WorkSpace/MediaCrawler/data/xhs/jsonl/a.jsonl"}]
+
+    no_report = server.finalize_local_xhs_search("agent_xhs_1", report_type="none")
+
+    assert no_report["status"] == "success"
+    assert no_report["report"] is None
+    assert no_report["report_type"] == "none"

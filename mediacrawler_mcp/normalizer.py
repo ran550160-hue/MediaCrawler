@@ -16,8 +16,10 @@ from mediacrawler_mcp.utils import utc_now_iso
 CONTENT_COLUMNS = (
     "dataset_id",
     "platform",
+    "collection_task_id",
     "source_keyword",
     "content_id",
+    "content_type",
     "author_id",
     "author_name",
     "title",
@@ -32,6 +34,9 @@ CONTENT_COLUMNS = (
     "share_count",
     "collect_count",
     "engagement_count",
+    "interaction_field_status",
+    "interaction_approximate_fields",
+    "interaction_parse_error_fields",
     "crawl_time",
     "raw_json",
 )
@@ -40,9 +45,28 @@ TAG_PATTERN = re.compile(r"#([^#\s\[]+)(?:\[话题\])?#?")
 TOPIC_MARKER_PATTERN = re.compile(r"\[话题\]")
 WHITESPACE_PATTERN = re.compile(r"\s+")
 
+LIKE_PATHS = (
+    ("interact_info", "liked_count"), ("note", "interact_info", "liked_count"), ("note_card", "interact_info", "liked_count"),
+    ("liked_count",), ("like_count",), ("likedCount",), ("likeCount",), ("likes",), ("likes_count",), ("like_num",), ("liked_num",), ("likeNum",),
+)
+COMMENT_PATHS = (
+    ("interact_info", "comment_count"), ("note", "interact_info", "comment_count"), ("note_card", "interact_info", "comment_count"),
+    ("comment_count",), ("comments_count",), ("commentCount",), ("commentsCount",), ("comments",), ("comment_num",),
+)
+SHARE_PATHS = (
+    ("interact_info", "share_count"), ("note", "interact_info", "share_count"), ("note_card", "interact_info", "share_count"),
+    ("share_count",), ("shares",), ("shareCount",), ("shares_count",), ("share_num",),
+)
+COLLECT_PATHS = (
+    ("interact_info", "collected_count"), ("note", "interact_info", "collected_count"), ("note_card", "interact_info", "collected_count"),
+    ("collected_count",), ("collect_count",), ("collectedCount",), ("collectCount",), ("favorite_count",), ("favoriteCount",), ("favorites",), ("collect_num",), ("collected_num",),
+)
+KNOWN_INTERACTION_PATHS = LIKE_PATHS + COMMENT_PATHS + SHARE_PATHS + COLLECT_PATHS
+
 COMMENT_COLUMNS = (
     "dataset_id",
     "platform",
+    "collection_task_id",
     "source_keyword",
     "content_id",
     "comment_id",
@@ -86,23 +110,96 @@ def _first_number(item: dict[str, Any], *keys: str) -> int:
     return _number(first_value)
 
 
+def _path_value(item: dict[str, Any], path: tuple[str, ...]) -> Any:
+    value: Any = item
+    for key in path:
+        if not isinstance(value, dict):
+            return None
+        value = value.get(key)
+    return value
+
+
+def _first_number_paths(item: dict[str, Any], *paths: tuple[str, ...]) -> int:
+    """Return the first non-zero numeric value across raw response shapes.
+
+    XHS search rows and note-detail rows expose interaction fields at different
+    nesting levels. Keeping the paths here makes the precedence explicit and
+    makes a zero a fallback rather than silently discarding a later real value.
+    """
+    first_value = None
+    for path in paths:
+        value = _path_value(item, path)
+        if value is None or str(value).strip() == "":
+            continue
+        if first_value is None:
+            first_value = value
+        number = _number(value)
+        if number != 0:
+            return number
+    return _number(first_value)
+
+
 def _number(value: Any) -> int:
+    number, _, _ = _number_with_status(value)
+    return number
+
+
+def _number_with_status(value: Any) -> tuple[int, bool, bool]:
     if value is None:
-        return 0
+        return 0, False, False
     text = str(value).replace(",", "").strip()
     if not text:
-        return 0
+        return 0, False, False
+    approximate = text.endswith("+")
+    if approximate:
+        text = text[:-1].strip()
+    if not text:
+        return 0, False, approximate
     multipliers = (("万", 10000), ("w", 10000), ("W", 10000), ("千", 1000), ("k", 1000), ("K", 1000))
     for suffix, multiplier in multipliers:
         if text.endswith(suffix):
             try:
-                return int(float(text[: -len(suffix)]) * multiplier)
+                return int(float(text[: -len(suffix)]) * multiplier), True, approximate
             except ValueError:
-                return 0
+                return 0, False, approximate
     try:
-        return int(float(text))
+        return int(float(text)), True, approximate
     except ValueError:
-        return 0
+        return 0, False, approximate
+
+
+def _interaction_metadata(item: dict[str, Any]) -> tuple[str, list[str], list[str]]:
+    """Expose approximate and failed fields instead of silently collapsing them to zero."""
+    fields = {"like_count": LIKE_PATHS, "comment_count": COMMENT_PATHS, "share_count": SHARE_PATHS, "collect_count": COLLECT_PATHS}
+    found = False
+    parsed_values: list[int] = []
+    approximate_fields: list[str] = []
+    parse_error_fields: list[str] = []
+    for field, paths in fields.items():
+        values = [_path_value(item, path) for path in paths]
+        values = [value for value in values if value is not None and str(value).strip() != ""]
+        if not values:
+            continue
+        found = True
+        results = [_number_with_status(value) for value in values]
+        parsed_values.extend(number for number, ok, _ in results if ok)
+        if any(approximate and ok for _, ok, approximate in results):
+            approximate_fields.append(field)
+        if any(not ok for _, ok, _ in results):
+            parse_error_fields.append(field)
+    if not found:
+        status = "missing"
+    elif not parsed_values:
+        status = "parse_error"
+    elif parse_error_fields:
+        status = "partial_parse_error"
+    elif approximate_fields:
+        status = "present_approximate"
+    elif all(value == 0 for value in parsed_values):
+        status = "present_zero"
+    else:
+        status = "present"
+    return status, approximate_fields, parse_error_fields
 
 
 def _datetime(value: Any) -> datetime | None:
@@ -226,41 +323,11 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
-def _normalize_content(dataset_id: str, item: dict[str, Any]) -> dict[str, Any]:
-    like_count = _first_number(
-        item,
-        "liked_count",
-        "like_count",
-        "likedCount",
-        "likeCount",
-        "likes",
-        "likes_count",
-        "like_num",
-        "liked_num",
-        "likeNum",
-    )
-    comment_count = _first_number(
-        item,
-        "comment_count",
-        "comments_count",
-        "commentCount",
-        "commentsCount",
-        "comments",
-        "comment_num",
-    )
-    share_count = _first_number(item, "share_count", "shares", "shareCount", "shares_count", "share_num")
-    collect_count = _first_number(
-        item,
-        "collected_count",
-        "collect_count",
-        "collectedCount",
-        "collectCount",
-        "favorite_count",
-        "favoriteCount",
-        "favorites",
-        "collect_num",
-        "collected_num",
-    )
+def _normalize_content(dataset_id: str, item: dict[str, Any], collection_task_id: str) -> dict[str, Any]:
+    like_count = _first_number_paths(item, *LIKE_PATHS)
+    comment_count = _first_number_paths(item, *COMMENT_PATHS)
+    share_count = _first_number_paths(item, *SHARE_PATHS)
+    collect_count = _first_number_paths(item, *COLLECT_PATHS)
     publish_time = _first_value(item, "time", "publish_time", "create_time", "last_update_time")
     raw_title = item.get("title")
     raw_desc = _first_value(item, "desc", "description")
@@ -270,11 +337,14 @@ def _normalize_content(dataset_id: str, item: dict[str, Any]) -> dict[str, Any]:
         + _extract_plain_tags(_first_value(item, "tags", "tag_list", "topic_list", "hash_tags"))
     )
     raw_json = json.dumps(item, ensure_ascii=False)
+    interaction_status, approximate_fields, parse_error_fields = _interaction_metadata(item)
     return {
         "dataset_id": dataset_id,
         "platform": "xhs",
+        "collection_task_id": collection_task_id,
         "source_keyword": _text(item.get("source_keyword")),
         "content_id": _text(_first_value(item, "note_id", "content_id", "id")),
+        "content_type": _text(_first_value(item, "type", "note_type", "content_type")),
         "author_id": _text(item.get("user_id")),
         "author_name": _text(item.get("nickname") or item.get("user_nickname")),
         "title": _clean_topic_text(raw_title),
@@ -289,6 +359,9 @@ def _normalize_content(dataset_id: str, item: dict[str, Any]) -> dict[str, Any]:
         "share_count": share_count,
         "collect_count": collect_count,
         "engagement_count": like_count + comment_count + share_count + collect_count,
+        "interaction_field_status": interaction_status,
+        "interaction_approximate_fields": json.dumps(approximate_fields, ensure_ascii=False),
+        "interaction_parse_error_fields": json.dumps(parse_error_fields, ensure_ascii=False),
         "crawl_time": _text(item.get("last_modify_ts") or item.get("crawl_time") or utc_now_iso()),
         "raw_json": raw_json,
     }
@@ -317,13 +390,19 @@ def _flatten_comment_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return flattened
 
 
-def _normalize_comment(dataset_id: str, item: dict[str, Any], source_keyword_by_content: dict[str, str]) -> dict[str, Any]:
+def _normalize_comment(
+    dataset_id: str,
+    item: dict[str, Any],
+    source_keyword_by_content: dict[str, str],
+    collection_task_id: str,
+) -> dict[str, Any]:
     content_id = _text(_first_value(item, "note_id", "content_id", "aweme_id"))
     publish_time = _first_value(item, "create_time", "publish_time", "time")
     raw_json = json.dumps(item, ensure_ascii=False)
     return {
         "dataset_id": dataset_id,
         "platform": "xhs",
+        "collection_task_id": collection_task_id,
         "source_keyword": _text(item.get("source_keyword")) or source_keyword_by_content.get(content_id, ""),
         "content_id": content_id,
         "comment_id": _text(_first_value(item, "comment_id", "id", "commentId")),
@@ -347,8 +426,10 @@ def _create_tables(conn: duckdb.DuckDBPyConnection) -> None:
         CREATE TABLE contents (
           dataset_id TEXT,
           platform TEXT,
+          collection_task_id TEXT,
           source_keyword TEXT,
           content_id TEXT,
+          content_type TEXT,
           author_id TEXT,
           author_name TEXT,
           title TEXT,
@@ -363,6 +444,9 @@ def _create_tables(conn: duckdb.DuckDBPyConnection) -> None:
           share_count BIGINT,
           collect_count BIGINT,
           engagement_count BIGINT,
+          interaction_field_status TEXT,
+          interaction_approximate_fields TEXT,
+          interaction_parse_error_fields TEXT,
           crawl_time TEXT,
           raw_json JSON
         )
@@ -373,6 +457,7 @@ def _create_tables(conn: duckdb.DuckDBPyConnection) -> None:
         CREATE TABLE comments (
           dataset_id TEXT,
           platform TEXT,
+          collection_task_id TEXT,
           source_keyword TEXT,
           content_id TEXT,
           comment_id TEXT,
@@ -452,7 +537,17 @@ class DatasetNormalizer:
                 f"Expected {contents_path} or {comments_path}",
             )
 
-        content_rows = [_normalize_content(dataset_id, item) for item in _read_jsonl(contents_path)] if contents_path.exists() else []
+        manifest_path = dataset_dir / "dataset.json"
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.exists() else {}
+        except json.JSONDecodeError:
+            manifest = {}
+        options = manifest.get("options") if isinstance(manifest, dict) else {}
+        options = options if isinstance(options, dict) else {}
+        collection_task_id = _text(options.get("collection_task_id") or options.get("task_id"))
+
+        raw_content_items = _read_jsonl(contents_path) if contents_path.exists() else []
+        content_rows = [_normalize_content(dataset_id, item, collection_task_id) for item in raw_content_items]
         content_rows = _dedupe_contents(content_rows)
         source_keyword_by_content = {
             row["content_id"]: row["source_keyword"]
@@ -460,7 +555,10 @@ class DatasetNormalizer:
             if row["content_id"] and row["source_keyword"]
         }
         raw_comment_items = _flatten_comment_items(_read_jsonl(comments_path)) if comments_path.exists() else []
-        comment_rows = [_normalize_comment(dataset_id, item, source_keyword_by_content) for item in raw_comment_items]
+        comment_rows = [
+            _normalize_comment(dataset_id, item, source_keyword_by_content, collection_task_id)
+            for item in raw_comment_items
+        ]
         comment_rows = _dedupe_comments(comment_rows)
 
         duckdb_path = dataset_dir / "analysis.duckdb"
@@ -478,4 +576,8 @@ class DatasetNormalizer:
             "duckdb_path": str(duckdb_path),
             "content_count": len(content_rows),
             "comment_count": len(comment_rows),
+            "raw_content_count": len(raw_content_items),
+            "raw_comment_count": len(raw_comment_items),
+            "deduplicated_content_count": len(raw_content_items) - len(content_rows),
+            "deduplicated_comment_count": len(raw_comment_items) - len(comment_rows),
         }

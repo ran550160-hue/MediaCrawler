@@ -51,6 +51,7 @@ def test_default_dataset_profile_hides_experimental_collection_tools(monkeypatch
         "normalize_dataset",
         "query_dataset",
         "generate_report",
+        "generate_topic_research_report",
         "get_report",
     }.issubset(names)
     assert EXPERIMENTAL_TOOL_NAMES.isdisjoint(names)
@@ -112,3 +113,32 @@ def test_start_qrcode_login_schema_exposes_qr_wait_seconds(monkeypatch):
 
     assert result["status"] == "waiting_scan"
     assert calls["qr_wait_seconds"] == 7
+
+
+def test_generate_report_dispatches_each_report_type_without_ambiguous_topic_alias(monkeypatch):
+    calls = []
+
+    class FakeTopicResearchService:
+        def __init__(self, storage):
+            pass
+
+        def generate_topic_research_report(self, dataset_id, top_n=10):
+            calls.append(("topic", dataset_id, top_n))
+            return {"report_type": "topic_research"}
+
+    class FakeReportService:
+        def __init__(self, storage):
+            pass
+
+        def generate_report(self, dataset_id, report_type="generic", top_n=20):
+            calls.append(("generic", dataset_id, report_type, top_n))
+            return {"report_type": report_type}
+
+    monkeypatch.setattr(server, "TopicResearchService", FakeTopicResearchService)
+    monkeypatch.setattr(server, "ReportService", FakeReportService)
+    monkeypatch.setattr(server, "_storage", lambda: object())
+
+    assert server.generate_report("dataset", report_type="topic_research", top_n=7)["report_type"] == "topic_research"
+    assert server.generate_report("dataset", report_type="generic", top_n=7)["report_type"] == "generic"
+    assert server.generate_report("dataset", report_type="none")["report"] is None
+    assert calls == [("topic", "dataset", 7), ("generic", "dataset", "generic", 7)]

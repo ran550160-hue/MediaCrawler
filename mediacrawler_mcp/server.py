@@ -22,6 +22,7 @@ from mediacrawler_mcp.normalizer import DatasetNormalizer
 from mediacrawler_mcp.query_engine import QueryEngine
 from mediacrawler_mcp.report_service import ReportService
 from mediacrawler_mcp.storage import Storage
+from mediacrawler_mcp.topic_research import TopicResearchService
 from mediacrawler_mcp.utils import setup_file_logging
 
 
@@ -274,19 +275,33 @@ def generate_report(
     report_type: str = "topic_research",
     top_n: int = 20,
 ) -> dict[str, Any]:
-    """Generate markdown/html report for a normalized dataset."""
+    """Generate topic_research, generic, or no report for a normalized dataset."""
     try:
-        report = ReportService(_storage()).generate_report(
-            dataset_id=dataset_id,
-            report_type=report_type,
-            top_n=top_n,
-        )
-        return success_result(**report)
+        report_type = (report_type or "topic_research").strip().lower()
+        if report_type == "topic_research":
+            return success_result(**TopicResearchService(_storage()).generate_topic_research_report(dataset_id, top_n=top_n))
+        if report_type == "generic":
+            return success_result(**ReportService(_storage()).generate_report(dataset_id=dataset_id, report_type="generic", top_n=top_n))
+        if report_type == "none":
+            return success_result(dataset_id=dataset_id, report_type="none", report=None)
+        raise McpAppError(ErrorCode.INVALID_ARGUMENT, "Invalid report type", "report_type must be topic_research, generic, or none")
     except McpAppError as exc:
         return exc.to_result()
     except Exception as exc:  # pragma: no cover - safety boundary for MCP tools
         logging.exception("Failed to generate report")
         return error_result(ErrorCode.INTERNAL_ERROR, "Failed to generate report", str(exc))
+
+
+@mcp.tool()
+def generate_topic_research_report(dataset_id: str, top_n: int = 10) -> dict[str, Any]:
+    """Generate an evidence-backed topic research report from a normalized XHS dataset."""
+    try:
+        return success_result(**TopicResearchService(_storage()).generate_topic_research_report(dataset_id, top_n=top_n))
+    except McpAppError as exc:
+        return exc.to_result()
+    except Exception as exc:  # pragma: no cover - safety boundary for MCP tools
+        logging.exception("Failed to generate topic research report")
+        return error_result(ErrorCode.INTERNAL_ERROR, "Failed to generate topic research report", str(exc))
 
 
 @mcp.tool()
@@ -573,13 +588,17 @@ def finalize_local_xhs_search(
     task_id: str,
     normalize: bool = True,
     generate_report: bool = True,
+    report_type: str = "topic_research",
     dataset_name: str = "",
     description: str = "",
     force: bool = False,
     base_url: str = "http://127.0.0.1:8080",
 ) -> dict[str, Any]:
-    """Finalize a Windows-local XHS search into a registered MCP dataset."""
+    """Finalize a local XHS search; report_type is topic_research, generic, or none."""
     try:
+        report_type = (report_type or "topic_research").strip().lower()
+        if report_type not in {"topic_research", "generic", "none"}:
+            raise McpAppError(ErrorCode.INVALID_ARGUMENT, "Invalid report type", "report_type must be topic_research, generic, or none")
         client = DesktopAgentClient(base_url=base_url)
         finalized = client.finalize_task(
             task_id,
@@ -597,8 +616,10 @@ def finalize_local_xhs_search(
         report = None
         if normalize:
             normalized = DatasetNormalizer(_storage()).normalize_dataset(dataset_id, force=True)
-        if generate_report:
-            report = ReportService(_storage()).generate_report(dataset_id=dataset_id)
+        if generate_report and report_type == "topic_research":
+            report = TopicResearchService(_storage()).generate_topic_research_report(dataset_id=dataset_id)
+        elif generate_report and report_type == "generic":
+            report = ReportService(_storage()).generate_report(dataset_id=dataset_id, report_type="generic")
 
         return success_result(
             task_id=task_id,
@@ -607,6 +628,7 @@ def finalize_local_xhs_search(
             registered=registered,
             normalized=normalized,
             report=report,
+            report_type="none" if not generate_report else report_type,
             preview=(finalized.get("files") or [])[:3],
         )
     except McpAppError as exc:

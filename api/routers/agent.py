@@ -414,6 +414,9 @@ async def finalize_agent_task(task_id: str, request: AgentTaskFinalizeRequest):
             contents_path=contents_path,
             comments_path=comments_path,
             dataset_id=request.dataset_id,
+            collection_task_id=task_id,
+            collection_started_at=task["started_at"].isoformat(),
+            collection_completed_at=(task.get("completed_at") or datetime.now()).isoformat(),
         )
     except McpAppError as exc:
         raise HTTPException(status_code=400, detail=exc.to_result()) from exc

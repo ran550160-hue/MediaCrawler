@@ -62,6 +62,9 @@ def test_exporter_builds_bundle_from_latest_desktop_jsonl_and_normalizes(tmp_pat
         data_root=data_root,
         crawler_type="search",
         dataset_id="desktop_bundle",
+        collection_task_id="task_xhs_lineage",
+        collection_started_at="2026-07-02T01:00:00+00:00",
+        collection_completed_at="2026-07-02T01:05:00+00:00",
     )
 
     bundle_dir = output_dir / "desktop_bundle"
@@ -74,6 +77,8 @@ def test_exporter_builds_bundle_from_latest_desktop_jsonl_and_normalizes(tmp_pat
     assert result["dataset_id"] == "desktop_bundle"
     assert manifest["metrics"] == {"content_count": 1, "comment_count": 1}
     assert manifest["options"]["contents_source"].endswith("search_contents_2026-07-02.jsonl")
+    assert manifest["options"]["collection_task_id"] == "task_xhs_lineage"
+    assert manifest["options"]["collection_started_at"] == "2026-07-02T01:00:00+00:00"
     assert contents_rows[0]["note_id"] == "n1"
 
     config = _config(tmp_path)

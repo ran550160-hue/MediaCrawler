@@ -372,9 +372,9 @@ class ReportService:
     def __init__(self, storage: Storage):
         self.storage = storage
 
-    def generate_report(self, dataset_id: str, report_type: str = "topic_research", top_n: int = 20) -> dict[str, Any]:
+    def generate_report(self, dataset_id: str, report_type: str = "generic", top_n: int = 20) -> dict[str, Any]:
         dataset_id = (dataset_id or "").strip()
-        report_type = (report_type or "topic_research").strip()
+        report_type = (report_type or "generic").strip()
         top_n = max(1, min(int(top_n or 20), 100))
         if not dataset_id:
             raise McpAppError(ErrorCode.INVALID_ARGUMENT, "Dataset ID is required")
