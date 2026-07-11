@@ -21,6 +21,8 @@ import csv
 import json
 import os
 import pathlib
+import secrets
+from datetime import datetime, timezone
 from typing import Dict, List
 import aiofiles
 import config
@@ -28,20 +30,52 @@ from tools.utils import utils
 from tools.words import AsyncWordCloudGenerator
 
 class AsyncFileWriter:
-    def __init__(self, platform: str, crawler_type: str):
+    def __init__(self, platform: str, crawler_type: str, run_id: str | None = None):
         self.lock = asyncio.Lock()
         self.platform = platform
         self.crawler_type = crawler_type
+        self.run_id = run_id or self._ensure_run_id()
         self.wordcloud_generator = AsyncWordCloudGenerator() if config.ENABLE_GET_WORDCLOUD else None
 
+    def _ensure_run_id(self) -> str:
+        configured = str(getattr(config, "SAVE_DATA_RUN_ID", "") or "").strip()
+        if configured:
+            return configured
+        run_id = f"run_{datetime.now(timezone.utc):%Y%m%d_%H%M%S}_{secrets.token_hex(3)}"
+        config.SAVE_DATA_RUN_ID = run_id
+        return run_id
+
+    def _output_root(self) -> pathlib.Path:
+        base = pathlib.Path(config.SAVE_DATA_PATH or "data")
+        if getattr(config, "SAVE_DATA_SHARED_OUTPUT", False):
+            utils.logger.warning("[AsyncFileWriter] Shared output mode is enabled; append may mix historical crawler runs")
+            return base / self.platform
+        root = base / self.platform / self.run_id
+        root.mkdir(parents=True, exist_ok=True)
+        metadata_path = root / "run_metadata.json"
+        if not metadata_path.exists():
+            metadata_path.write_text(
+                json.dumps(
+                    {
+                        "run_id": self.run_id,
+                        "platform": self.platform,
+                        "crawler_type": self.crawler_type,
+                        "keywords": [keyword.strip() for keyword in str(config.KEYWORDS or "").split(",") if keyword.strip()],
+                        "started_at": datetime.now(timezone.utc).isoformat(),
+                        "output_dir": str(root),
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+        return root
+
     def _get_file_path(self, file_type: str, item_type: str) -> str:
-        if config.SAVE_DATA_PATH:
-            base_path = f"{config.SAVE_DATA_PATH}/{self.platform}/{file_type}"
-        else:
-            base_path = f"data/{self.platform}/{file_type}"
+        base_path = self._output_root() / file_type
         pathlib.Path(base_path).mkdir(parents=True, exist_ok=True)
-        file_name = f"{self.crawler_type}_{item_type}_{utils.get_current_date()}.{file_type}"
-        return f"{base_path}/{file_name}"
+        file_name = f"{self.crawler_type}_{item_type}.{file_type}"
+        return str(base_path / file_name)
 
     async def write_to_csv(self, item: Dict, item_type: str):
         file_path = self._get_file_path('csv', item_type)
@@ -132,12 +166,9 @@ class AsyncFileWriter:
                 return
 
             # Generate wordcloud
-            if config.SAVE_DATA_PATH:
-                words_base_path = f"{config.SAVE_DATA_PATH}/{self.platform}/words"
-            else:
-                words_base_path = f"data/{self.platform}/words"
+            words_base_path = self._output_root() / "words"
             pathlib.Path(words_base_path).mkdir(parents=True, exist_ok=True)
-            words_file_prefix = f"{words_base_path}/{self.crawler_type}_comments_{utils.get_current_date()}"
+            words_file_prefix = str(words_base_path / f"{self.crawler_type}_comments")
 
             utils.logger.info(f"[AsyncFileWriter.generate_wordcloud_from_comments] Generating wordcloud from {len(filtered_data)} comments")
             await self.wordcloud_generator.generate_word_frequency_and_cloud(filtered_data, words_file_prefix)

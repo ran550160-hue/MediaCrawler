@@ -91,6 +91,10 @@ SAVE_DATA_OPTION = "jsonl"  # csv or db or json or jsonl or sqlite or excel or p
 
 # Data saving path, if not specified by default, it will be saved to the data folder.
 SAVE_DATA_PATH = ""
+# Each CLI crawler process writes file-based output beneath one isolated run directory.
+# Set only for explicit legacy compatibility; append output may then mix historical runs.
+SAVE_DATA_SHARED_OUTPUT = False
+SAVE_DATA_RUN_ID = ""
 
 # Browser file configuration cached by the user's browser
 USER_DATA_DIR = "%s_user_data_dir"  # %s will be replaced by platform name
