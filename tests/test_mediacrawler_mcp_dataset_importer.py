@@ -93,7 +93,7 @@ def test_validate_dataset_bundle_accepts_contents_only_with_warning(tmp_path):
     assert result["metadata"]["platforms"] == ["xhs"]
     assert result["raw_files"]["contents"]["line_count"] == 1
     assert result["raw_files"]["comments"]["exists"] is False
-    assert any("xhs_comments" in warning for warning in result["warnings"])
+    assert any("raw comments file is missing" in warning for warning in result["warnings"])
 
 
 def test_register_dataset_copies_bundle_and_writes_sqlite_metadata(tmp_path):

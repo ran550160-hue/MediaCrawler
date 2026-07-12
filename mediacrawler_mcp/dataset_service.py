@@ -11,7 +11,7 @@ from mediacrawler_mcp.storage import Storage
 from mediacrawler_mcp.utils import make_dataset_id, utc_now_iso
 
 
-SUPPORTED_PLATFORMS = {"xhs"}
+SUPPORTED_PLATFORMS = {"xhs", "douyin"}
 
 
 class DatasetService:

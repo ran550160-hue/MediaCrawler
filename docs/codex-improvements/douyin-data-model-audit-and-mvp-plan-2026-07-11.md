@@ -90,3 +90,43 @@
 ## 架构判断
 
 当前应复用数据集注册、存储、归一化质量、证据报告、缩写数值解析、安全 URL 和 run_id 输出隔离；保留抖音原始路径、媒体、回复、内容类型和互动来源为平台特有适配函数。尚无两个以上稳定调用点证明需要 `PlatformAdapterFactory`、通用研究引擎或多层抽象。
+
+## 附录：2026-07-12 真实冒烟验证结果
+
+以下结论由 2026-07-12 真实 CLI 冒烟确认（抖音标准 Playwright 模式 + 小红书 CDP 模式），均在 `b174451 fix(storage): isolate legacy crawler outputs by run id` 之上验证：
+
+- 真实抖音搜索成功：关键词 `Cursor编辑器`，1 页返回 13 条视频，无风控、无验证码、无接口异常。
+- 一级评论采集成功并与 `aweme_id` 关联：34 条一级评论全部 `aweme_id` 可关联本次 contents，`parent_comment_id == "0"` 判定一级。
+- 一级评论采集成功并与 `aweme_id` 关联：34 条一级评论全部 `aweme_id` 可关联本次 contents，`parent_comment_id == "0"` 判定一级。评论按 aweme 分布：11 个视频各 3 条、1 个视频 1 条、1 个视频 0 条（`7654979792168586539`），评论覆盖 12/13 个视频，无 orphan 评论。
+- 二级评论 `parent_comment_id` 结构已验证：detail 模式 `--get_sub_comment yes` 得 2 条一级 + 27 条二级；二级评论 `parent_comment_id` 指向一级评论 cid，保存记录中不存在 `reply_id`、`root_comment_id`、`reply_to_comment_id`，因此当前只能区分一级/二级，无法还原 reply-to-reply 更深线程。
+- 二级评论无分页重复：detail 模式 29 行 29 个唯一 `comment_id`，0 重复；2 条一级 + 27 条二级，每个非零 `parent_comment_id` 均可匹配同一文件中的一级评论；`sub_comment_count` 字段值与实际唯一二级数量不严格相等，但不作为采全率依据。
+- run_id 目录真实可用：抖音输出位于 `data/douyin/<run_id>/jsonl/search_contents.jsonl`，contents/comments 共享同一 run_id，`run_metadata.json` 与实际任务一致；小红书 CDP 同构 `data/xhs/<run_id>/...`。
+- URL 可由 `aweme_id` 构造：`https://www.douyin.com/video/{aweme_id}` 13/13 稳定且与 id 匹配，无需 cookie/token/签名进数据集。
+- 评论没有 `source_keyword`：抖音评论保存记录 0/34 不含 `source_keyword`，但 34/34 可由 `aweme_id` 关联父视频继承；小红书评论同理（0/6，可由 note_id 继承）。
+- `play_count`/`duration`/`hashtags`/`challenges` 在当前 store 保存记录中不存在；本轮未保存或审计完整远端原始响应，因此无法判断远端响应中是否存在。不据此扩保存模型。
+- `ip_location` 在 contents 中不存在（0/13），但在评论中存在（34/34）；fixture 脱敏必须删除 `ip_location`。
+- 互动字段类型：contents 互动字段（liked/comment/collected/share_count）均为整数字符串；评论 `like_count` 为整数。归一化阶段需处理这两类形态。
+- `aweme_type` 在本次保存记录中为字符串 `"0"`（0/13），非整数。
+- aweme `7457151414150696219` 互动值：liked_count=`"52067"`、comment_count=`"1312"`、collected_count=`"48956"`、share_count=`"10405"`（均为 str），`create_time=1736253384`（int，秒级 Unix）。
+- 数据安全：保存 JSONL 与日志中均未发现 `cookie`/`token`/`device`/`verifyFp`/`msToken`/`a_bogus`/`signature` 泄漏；`sec_uid` 在抖音 contents/comments 中存在，fixture 必须脱敏。
+- MCP 回归修复（`921047a fix(mcp): discover run-isolated crawler outputs`）：`archive_outputs` 现可发现 run-isolated 输出并拒绝多 run 静默合并，旧日期共享路径作为 fallback 并以 `output_layout=legacy_shared` 标记。
+
+保留限制（仅代表本次账号与时间点）：
+
+- 无法还原 reply-to-reply 的更深线程。
+- 媒体输出目录隔离尚未验证（本轮 `ENABLE_GET_MEIDAS=False`，媒体 store 仍走平台共享路径 `data/{platform}/images|videos`）。
+- 登录与风控结果仅代表本次账号与时间点；抖音复用了 Playwright 持久 profile（`browser_data/dy_user_data_dir`）中的历史登录态（标准模式，非 CDP），未本轮扫码。小红书 6/27 标准登录态已失效，改用 CDP 模式复用已登录的 Chrome 后成功。CDP 登录模式下的抖音采集留到后续 MCP/Agent PR 验证。
+- CDP 登录模式不是 PR 1 的前置条件；raw/bundle 接入不依赖具体登录方式。
+
+## 附录：PR 1 实现状态（2026-07-12）
+
+PR 1（抖音 raw + bundle 接入）已实现并独立提交（`feat(mcp): add Douyin raw dataset bundle support`）：
+
+- `DatasetBundleExporter.export_douyin_bundle`：忠实复制 contents（必需）与 comments（可选）至 `raw/douyin_contents.jsonl`、`raw/douyin_comments.jsonl`，不补写 `source_keyword`、不转 int/str、不改 `parent_comment_id`、不计算 engagement。
+- manifest 记录 platform=douyin、run_id、output_layout、crawler_type、declared keywords、collection_started_at、source contents/comments path、raw content/comment count，缺失值写 null/unavailable。
+- `capability` 块明确记录：source_keyword 仅存在于 contents、comments 需在归一化经 `aweme_id` 继承、二级评论 `parent_comment_id` 指向根一级、不存在 reply-to 字段。
+- `capability` 块新增四个显式字段：`comments_source_keyword = absent_in_raw`、`comments_source_keyword_derivation = inherit_from_parent_by_aweme_id_in_normalization`、`reply_model = root_and_second_level_only`、`reply_to_reply_chain = unavailable`。
+- `_verify_aweme_linkage` 拒绝 contents/comments 无任何 aweme_id 交集（防止跨 run 静默合并）。
+- 严格脱敏 fixture 位于 `tests/fixtures/douyin/`：2 条 contents + 1 条一级 + 2 条二级评论；删除 `sec_uid`/`user_signature`/`avatar`/`ip_location`/`cover_url`/`video_download_url`/`music_download_url`/`cookie`/`token`/`verifyFp`/`msToken`/`a_bogus`/`signature` 及 CDN 域名；正文/标题/评论为不可搜索合成文本；ID 保持 `comment.aweme_id == content.aweme_id`、`reply.parent_comment_id == root.comment_id`，不伪造 `reply_id`/`root_comment_id`/`reply_to_comment_id`；递归安全测试禁止 `sec_uid`/`user_signature`/`ip_location`/`byteimg`/`douyinvod`/`cookie`/`token`/`device`/`verifyfp`/`mstoken`/`a_bogus`/`signature`。
+- 未新增 `exposure_count`/`duration_ms`/`hashtags`/`challenges`，未修改 DuckDB schema，未实现抖音 MCP 入口、归一化、报告与媒体下载隔离。
+- 报告 URL 安全修复（`d9fe28a fix(report): strip sensitive query parameters from evidence URLs`）：`strip_sensitive_url_params` 工具函数从 report_service 和 topic_research 输出的 URL 中移除 `xsec_token`/`token`/`cookie`/`verifyFp`/`msToken`/`a_bogus`/`signature` query 参数，保留稳定页面路径，raw JSONL 不变。summary JSON、Markdown、HTML 三种输出均不含敏感参数。

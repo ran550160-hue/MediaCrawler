@@ -17,7 +17,11 @@ RAW_FILE_NAMES = {
     "xhs": {
         "contents": "xhs_contents.jsonl",
         "comments": "xhs_comments.jsonl",
-    }
+    },
+    "douyin": {
+        "contents": "douyin_contents.jsonl",
+        "comments": "douyin_comments.jsonl",
+    },
 }
 
 
@@ -79,26 +83,46 @@ class DatasetImporter:
             warnings.append("dataset.json is missing; metadata will be inferred from directory and raw files")
 
         detected_platforms: set[str] = set()
-        for platform, names in RAW_FILE_NAMES.items():
-            raw_dir = source_dir / "raw"
+        manifest_platforms = self._as_string_list(manifest.get("platforms"))
+        # A bundle is single-platform; scope raw file detection to the declared
+        # platform when available so the xhs and douyin file checks do not
+        # overwrite each other's status under the same raw_files key.
+        candidate_platforms = sorted(
+            manifest_platforms or [*RAW_FILE_NAMES.keys()]
+        )
+        raw_dir = source_dir / "raw"
+        for platform in candidate_platforms:
+            names = RAW_FILE_NAMES.get(platform)
+            if not names:
+                continue
             for logical_name, file_name in names.items():
                 path = raw_dir / file_name
                 info = self._inspect_jsonl(path)
                 raw_files[logical_name] = {
                     "path": str(path),
                     "exists": path.exists(),
+                    "platform": platform,
                     **info,
                 }
                 if path.exists():
                     detected_platforms.add(platform)
                 errors.extend(info["errors"])
+            if manifest_platforms:
+                break
 
         if not raw_files["contents"]["exists"] and not raw_files["comments"]["exists"]:
-            errors.append("No raw JSONL files found; expected raw/xhs_contents.jsonl or raw/xhs_comments.jsonl")
+            if "contents" not in raw_files:
+                raw_files["contents"] = {"path": "", "exists": False, "line_count": 0, "size_bytes": 0, "errors": []}
+            if "comments" not in raw_files:
+                raw_files["comments"] = {"path": "", "exists": False, "line_count": 0, "size_bytes": 0, "errors": []}
+            expected = sorted(
+                name for names in RAW_FILE_NAMES.values() for name in (names["contents"], names["comments"])
+            )
+            errors.append(f"No raw JSONL files found; expected one of {expected}")
         if not raw_files["comments"]["exists"]:
-            warnings.append("raw/xhs_comments.jsonl is missing; dataset can still be normalized with contents only")
+            warnings.append("raw comments file is missing; dataset can still be normalized with contents only")
 
-        platforms = self._as_string_list(manifest.get("platforms")) or sorted(detected_platforms) or ["xhs"]
+        platforms = manifest_platforms or sorted(detected_platforms) or ["xhs"]
         unsupported = sorted(set(platforms) - SUPPORTED_PLATFORMS)
         if unsupported:
             errors.append(f"Unsupported platforms in dataset.json: {', '.join(unsupported)}")
@@ -335,7 +359,13 @@ class DatasetImporter:
         warnings: list[str] = []
         errors: list[str] = []
 
-        for platform, names in RAW_FILE_NAMES.items():
+        manifest = self._read_manifest(dataset_dir / "dataset.json")
+        declared = self._as_string_list(manifest.get("platforms"))
+        candidate_platforms = declared or sorted(RAW_FILE_NAMES.keys())
+        for platform in candidate_platforms:
+            names = RAW_FILE_NAMES.get(platform)
+            if not names:
+                continue
             for logical_name, file_name in names.items():
                 path = dataset_dir / "raw" / file_name
                 info = self._inspect_jsonl(path)
@@ -351,11 +381,14 @@ class DatasetImporter:
                     elif logical_name == "comments":
                         metrics["comment_count"] = info["line_count"]
                 errors.extend(info["errors"])
+            if declared:
+                break
 
         if "contents" not in files["raw"] and "comments" not in files["raw"]:
             warnings.append("No raw JSONL files found under raw/")
         elif "comments" not in files["raw"]:
-            warnings.append("raw/xhs_comments.jsonl is missing; comment analysis will be empty")
+            missing = [names["comments"] for names in RAW_FILE_NAMES.values()]
+            warnings.append(f"raw comments file is missing (one of {missing}); comment analysis will be empty")
         return {"files": files, "metrics": metrics, "warnings": warnings, "errors": errors}
 
     @staticmethod

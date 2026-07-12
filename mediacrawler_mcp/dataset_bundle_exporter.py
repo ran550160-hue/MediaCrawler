@@ -128,6 +128,153 @@ class DatasetBundleExporter:
             "warnings": warnings,
         }
 
+    def export_douyin_bundle(
+        self,
+        name: str,
+        output_dir: str | Path,
+        keywords: list[str],
+        *,
+        contents_path: str | Path,
+        comments_path: str | Path | None = None,
+        run_id: str | None = None,
+        output_layout: str = "run_isolated",
+        crawler_type: str = "search",
+        description: str | None = None,
+        source_contents_path: str | Path | None = None,
+        source_comments_path: str | Path | None = None,
+        collection_started_at: str | None = None,
+        dataset_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Register a minimal Douyin raw dataset bundle.
+
+        PR 1 only copies the crawled JSONL records as-is into ``raw/`` and writes
+        a manifest describing provenance. It does not normalize data, derive
+        ``source_keyword`` for comments, compute engagement, convert types, or
+        extend the raw record in any way. Multiple runs must never be merged;
+        callers pass a single run's data per call.
+        """
+        name = (name or "").strip()
+        keywords = [keyword.strip() for keyword in keywords or [] if keyword and keyword.strip()]
+        crawler_type = (crawler_type or "search").strip()
+        output_layout = (output_layout or "run_isolated").strip()
+        if not name:
+            raise McpAppError(ErrorCode.INVALID_ARGUMENT, "Dataset name is required")
+        if not keywords:
+            raise McpAppError(ErrorCode.INVALID_ARGUMENT, "At least one keyword is required")
+        if not crawler_type:
+            raise McpAppError(ErrorCode.INVALID_ARGUMENT, "Crawler type is required")
+        if output_layout not in {"run_isolated", "legacy_shared"}:
+            raise McpAppError(ErrorCode.INVALID_ARGUMENT, "Unsupported output_layout", f"output_layout={output_layout}")
+
+        contents_source = Path(contents_path).expanduser()
+        if not contents_source.exists() or not contents_source.is_file():
+            raise McpAppError(
+                ErrorCode.INVALID_ARGUMENT,
+                "Douyin contents raw file is required",
+                f"contents_path={contents_source}",
+            )
+
+        comments_source: Path | None = None
+        if comments_path is not None and str(comments_path).strip():
+            comments_source = Path(comments_path).expanduser()
+            if not comments_source.exists() or not comments_source.is_file():
+                raise McpAppError(
+                    ErrorCode.INVALID_ARGUMENT,
+                    "Douyin comments raw file does not exist",
+                    f"comments_path={comments_source}",
+                )
+
+        output_root = Path(output_dir).expanduser().resolve()
+        dataset_id = self._normalize_dataset_id(dataset_id) if dataset_id else make_dataset_id(name, output_root)
+        bundle_dir = output_root / dataset_id
+        if bundle_dir.exists():
+            raise McpAppError(
+                ErrorCode.INVALID_ARGUMENT,
+                "Dataset bundle already exists",
+                f"dataset_dir={bundle_dir}",
+            )
+
+        raw_dir = bundle_dir / "raw"
+        media_dir = bundle_dir / "media"
+        logs_dir = bundle_dir / "logs"
+        raw_dir.mkdir(parents=True)
+        media_dir.mkdir()
+        logs_dir.mkdir()
+
+        warnings: list[str] = []
+        errors: list[str] = []
+        files: dict[str, Any] = {"raw": {}, "reports": {}}
+        metrics = {"content_count": 0, "comment_count": 0}
+        raw_names = RAW_FILE_NAMES["douyin"]
+
+        destination = raw_dir / raw_names["contents"]
+        metrics["content_count"] = self._copy_as_jsonl(contents_source, destination)
+        files["raw"]["contents"] = self._raw_file_info("douyin", destination, metrics["content_count"])
+
+        if comments_source is not None:
+            destination = raw_dir / raw_names["comments"]
+            metrics["comment_count"] = self._copy_as_jsonl(comments_source, destination)
+            files["raw"]["comments"] = self._raw_file_info("douyin", destination, metrics["comment_count"])
+        else:
+            warnings.append("comments input is missing; bundle contains contents only")
+        self._verify_aweme_linkage(contents_source, comments_source)
+
+        # Capability/limitation facts discovered by real smoke tests:
+        #  - douyin contents carry source_keyword; comments do not.
+        #  - comments re-derive source_keyword in normalization via aweme_id.
+        warnings.append("Douyin comments omit source_keyword; normalize by joining comments.aweme_id -> contents.aweme_id")
+
+        now = utc_now_iso()
+        manifest = {
+            "dataset_id": dataset_id,
+            "name": name,
+            "description": description,
+            "status": "exported",
+            "platforms": ["douyin"],
+            "keywords": keywords,
+            "options": {
+                "source": "desktop_export",
+                "crawler_type": crawler_type,
+                "output_layout": output_layout,
+                "run_id": run_id or None,
+                "contents_source": str(source_contents_path or contents_source),
+                "comments_source": str(source_comments_path or comments_source) if comments_source else None,
+                "collection_started_at": collection_started_at or None,
+            },
+            "capability": {
+                "platform": "douyin",
+                "source_keyword_in_contents": True,
+                "source_keyword_in_comments": False,
+                "source_keyword_comments_inherit": "aweme_id",
+                "second_level_parent_field": "parent_comment_id",
+                "second_level_reply_to_fields_present": False,
+                "comments_source_keyword": "absent_in_raw",
+                "comments_source_keyword_derivation": "inherit_from_parent_by_aweme_id_in_normalization",
+                "reply_model": "root_and_second_level_only",
+                "reply_to_reply_chain": "unavailable",
+            },
+            "dataset_dir": str(bundle_dir),
+            "created_at": now,
+            "updated_at": now,
+            "files": files,
+            "metrics": metrics,
+            "warnings": warnings,
+            "errors": errors,
+        }
+        (bundle_dir / "dataset.json").write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+        return {
+            "dataset_id": dataset_id,
+            "dataset_dir": str(bundle_dir),
+            "dataset_json_path": str(bundle_dir / "dataset.json"),
+            "raw_files": files["raw"],
+            "metrics": metrics,
+            "warnings": warnings,
+        }
+
     @staticmethod
     def _copy_as_jsonl(source: Path | str, destination: Path) -> int:
         try:
@@ -169,3 +316,46 @@ class DatasetBundleExporter:
         if not normalized:
             raise McpAppError(ErrorCode.INVALID_ARGUMENT, "Invalid dataset_id")
         return normalized
+
+    @staticmethod
+    def _verify_aweme_linkage(contents_source: Path, comments_source: Path | None) -> None:
+        """Reject contents/comments that look like two different runs with no shared aweme_id.
+
+        Comments re-derive ``source_keyword`` by joining on ``aweme_id`` during
+        normalization, so a zero-overlap content/comment pair signals the caller
+        accidentally paired data from different runs. Refuse silently merging.
+        """
+        if comments_source is None:
+            return
+        content_awemes: set[str] = set()
+        with Path(contents_source).open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    item = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                aweme = str(item.get("aweme_id") or "").strip()
+                if aweme:
+                    content_awemes.add(aweme)
+        comment_awemes: set[str] = set()
+        with Path(comments_source).open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    item = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                aweme = str(item.get("aweme_id") or "").strip()
+                if aweme:
+                    comment_awemes.add(aweme)
+        if comment_awemes and not (comment_awemes & content_awemes):
+            raise McpAppError(
+                ErrorCode.INVALID_ARGUMENT,
+                "Douyin contents and comments do not share any aweme_id; refusing to merge different runs",
+                f"contents_awemes={len(content_awemes)} comments_awemes={len(comment_awemes)}",
+            )
