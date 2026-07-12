@@ -42,13 +42,13 @@ class DatasetService:
         if unsupported:
             raise McpAppError(
                 ErrorCode.UNSUPPORTED_PLATFORM,
-                "Only xhs is supported in the first MCP phase",
+                "Unsupported platform(s)",
                 f"Unsupported platforms: {', '.join(unsupported)}",
             )
-        if platforms != ["xhs"]:
+        if len(platforms) != 1:
             raise McpAppError(
                 ErrorCode.UNSUPPORTED_PLATFORM,
-                "Only platforms=['xhs'] is supported in the first MCP phase",
+                "Only single-platform datasets are supported",
                 f"Received platforms: {platforms}",
             )
 

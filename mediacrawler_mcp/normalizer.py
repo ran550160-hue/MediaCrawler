@@ -10,7 +10,8 @@ import duckdb
 
 from mediacrawler_mcp.errors import ErrorCode, McpAppError
 from mediacrawler_mcp.storage import Storage
-from mediacrawler_mcp.utils import utc_now_iso
+from mediacrawler_mcp.dataset_importer import RAW_FILE_NAMES
+from mediacrawler_mcp.utils import strip_sensitive_url_params, utc_now_iso
 
 
 CONTENT_COLUMNS = (
@@ -418,6 +419,195 @@ def _normalize_comment(
     }
 
 
+# ---------------------------------------------------------------------------
+# Douyin normalization
+# ---------------------------------------------------------------------------
+
+# aweme_type raw values explicitly mapped to common content_type labels.
+# Only values covered by verified code or real fixtures belong here;
+# everything else degrades to ``douyin_aweme_<raw_value>``.
+_DOUYIN_AWEME_TYPE_MAP: dict[str, str] = {
+    "0": "video",
+}
+
+_FIRST_LEVEL_PARENT_VALUES = frozenset({"", "0", "none", "null"})
+
+
+def _douyin_content_type(raw_aweme_type: Any) -> str:
+    raw_text = _text(raw_aweme_type).strip()
+    if not raw_text:
+        return "douyin_aweme_unknown"
+    mapped = _DOUYIN_AWEME_TYPE_MAP.get(raw_text)
+    if mapped is not None:
+        return mapped
+    return f"douyin_aweme_{raw_text}"
+
+
+def _douyin_url(item: dict[str, Any]) -> str:
+    raw_url = _first_value(item, "aweme_url", "note_url", "url")
+    aweme_id = _text(_first_value(item, "aweme_id", "content_id", "id"))
+    if raw_url:
+        return strip_sensitive_url_params(_text(raw_url)) or ""
+    if aweme_id:
+        return f"https://www.douyin.com/video/{aweme_id}"
+    return ""
+
+
+_DOUYIN_INTERACTION_FIELDS = (
+    ("like_count", ("liked_count", "like_count")),
+    ("comment_count", ("comment_count",)),
+    ("share_count", ("share_count",)),
+    ("collect_count", ("collected_count", "collect_count")),
+)
+
+
+def _douyin_interaction_metadata(item: dict[str, Any]) -> tuple[str, list[str], list[str]]:
+    """Same status taxonomy as XHS but keyed on flat Douyin field names."""
+    parsed_values: list[int] = []
+    approximate_fields: list[str] = []
+    parse_error_fields: list[str] = []
+    found_any = False
+    for field, keys in _DOUYIN_INTERACTION_FIELDS:
+        value = _first_value(item, *keys)
+        if value is None or str(value).strip() == "":
+            continue
+        found_any = True
+        number, ok, approximate = _number_with_status(value)
+        if ok:
+            parsed_values.append(number)
+        if approximate and ok:
+            approximate_fields.append(field)
+        if not ok:
+            parse_error_fields.append(field)
+    if not found_any:
+        status = "missing"
+    elif not parsed_values:
+        status = "parse_error"
+    elif parse_error_fields:
+        status = "partial_parse_error"
+    elif approximate_fields:
+        status = "present_approximate"
+    elif all(value == 0 for value in parsed_values):
+        status = "present_zero"
+    else:
+        status = "present"
+    return status, approximate_fields, parse_error_fields
+
+
+def _normalize_douyin_content(dataset_id: str, item: dict[str, Any], collection_task_id: str) -> dict[str, Any]:
+    like_count = _number(item.get("liked_count"))
+    comment_count = _number(item.get("comment_count"))
+    share_count = _number(item.get("share_count"))
+    collect_count = _number(item.get("collected_count"))
+    publish_time = _first_value(item, "create_time", "publish_time")
+    raw_title = item.get("title")
+    raw_desc = _first_value(item, "desc", "description")
+    raw_content = _first_value(item, "content", "content_text", "desc", "description", "title")
+    raw_aweme_type = item.get("aweme_type")
+    # Douyin raw rows do not carry hashtags/challenges lists; extract from text.
+    tags = _extract_tags_from_text(raw_title, raw_desc, raw_content)
+    interaction_status, approximate_fields, parse_error_fields = _douyin_interaction_metadata(item)
+    return {
+        "dataset_id": dataset_id,
+        "platform": "douyin",
+        "collection_task_id": collection_task_id,
+        "source_keyword": _text(item.get("source_keyword")),
+        "content_id": _text(_first_value(item, "aweme_id", "content_id", "id")),
+        "content_type": _douyin_content_type(raw_aweme_type),
+        "author_id": _text(item.get("user_id")),
+        "author_name": _text(item.get("nickname") or item.get("user_nickname")),
+        "title": _clean_topic_text(raw_title),
+        "desc": _clean_topic_text(raw_desc),
+        "content_text": _clean_topic_text(raw_content),
+        "tags": json.dumps(tags, ensure_ascii=False),
+        "url": _douyin_url(item),
+        "publish_time": _text(publish_time),
+        "publish_datetime": _datetime(publish_time),
+        "like_count": like_count,
+        "comment_count": comment_count,
+        "share_count": share_count,
+        "collect_count": collect_count,
+        "engagement_count": like_count + comment_count + share_count + collect_count,
+        "interaction_field_status": interaction_status,
+        "interaction_approximate_fields": json.dumps(approximate_fields, ensure_ascii=False),
+        "interaction_parse_error_fields": json.dumps(parse_error_fields, ensure_ascii=False),
+        "crawl_time": _text(item.get("last_modify_ts") or item.get("crawl_time") or utc_now_iso()),
+        "raw_json": json.dumps(item, ensure_ascii=False),
+    }
+
+
+def _normalize_douyin_parent_comment_id(raw_value: Any) -> str | None:
+    """Normalize Douyin ``parent_comment_id``.
+
+    Raw values of ``"0"`` / ``0`` / ``null`` / empty string mean a first-level
+    comment and become ``None``.  Any other non-zero value is retained as a
+    string ID for second-level replies.
+    """
+    if raw_value is None:
+        return None
+    text_value = _text(raw_value).strip()
+    if not text_value or text_value.lower() in _FIRST_LEVEL_PARENT_VALUES:
+        return None
+    return text_value
+
+
+def _normalize_douyin_comment(
+    dataset_id: str,
+    item: dict[str, Any],
+    source_keyword_by_content: dict[str, str],
+    collection_task_id: str,
+) -> dict[str, Any]:
+    content_id = _text(_first_value(item, "aweme_id", "content_id", "note_id"))
+    publish_time = _first_value(item, "create_time", "publish_time", "time")
+    return {
+        "dataset_id": dataset_id,
+        "platform": "douyin",
+        "collection_task_id": collection_task_id,
+        # raw comments never carry source_keyword; inherit via aweme_id.
+        "source_keyword": _text(item.get("source_keyword")) or source_keyword_by_content.get(content_id, ""),
+        "content_id": content_id,
+        "comment_id": _text(_first_value(item, "comment_id", "id", "commentId")),
+        "parent_comment_id": _normalize_douyin_parent_comment_id(item.get("parent_comment_id")),
+        "user_id": _text(item.get("user_id")),
+        "user_name": _text(item.get("nickname") or item.get("user_nickname")),
+        "comment_text": _text(_first_value(item, "content", "comment_text", "comment_content", "text")),
+        "like_count": _number(_first_value(item, "like_count", "liked_count", "like_num")),
+        "publish_time": _text(publish_time),
+        "publish_datetime": _datetime(publish_time),
+        "crawl_time": _text(item.get("last_modify_ts") or item.get("crawl_time") or utc_now_iso()),
+        "raw_json": json.dumps(item, ensure_ascii=False),
+    }
+
+
+def _normalize_diagnostics(
+    content_rows: list[dict[str, Any]], comment_rows: list[dict[str, Any]]
+) -> tuple[int, int]:
+    """Count orphan comments and reply-lineage anomalies.
+
+    An orphan comment has ``content_id`` not present among normalized content
+    rows.  A reply-lineage anomaly is a second-level comment whose
+    ``parent_comment_id`` does not match any known ``comment_id``; first-level
+    sentinel values (``None``/``"0"``/empty) are never flagged.
+    """
+    content_ids = {row["content_id"] for row in content_rows if row.get("content_id")}
+    comment_ids = {row["comment_id"] for row in comment_rows if row.get("comment_id")}
+    orphan_count = 0
+    lineage_anomaly_count = 0
+    for row in comment_rows:
+        content_id = row.get("content_id") or ""
+        if content_id and content_id not in content_ids:
+            orphan_count += 1
+        parent = row.get("parent_comment_id")
+        if parent is None:
+            continue
+        parent_text = _text(parent).strip()
+        if not parent_text or parent_text.lower() in _FIRST_LEVEL_PARENT_VALUES:
+            continue
+        if parent_text not in comment_ids:
+            lineage_anomaly_count += 1
+    return orphan_count, lineage_anomaly_count
+
+
 def _create_tables(conn: duckdb.DuckDBPyConnection) -> None:
     conn.execute("DROP TABLE IF EXISTS contents")
     conn.execute("DROP TABLE IF EXISTS comments")
@@ -528,14 +718,6 @@ class DatasetNormalizer:
 
         dataset_dir = Path(row["dataset_dir"])
         raw_dir = dataset_dir / "raw"
-        contents_path = raw_dir / "xhs_contents.jsonl"
-        comments_path = raw_dir / "xhs_comments.jsonl"
-        if not contents_path.exists() and not comments_path.exists():
-            raise McpAppError(
-                ErrorCode.NORMALIZE_FAILED,
-                "No raw xhs JSONL files found",
-                f"Expected {contents_path} or {comments_path}",
-            )
 
         manifest_path = dataset_dir / "dataset.json"
         try:
@@ -546,20 +728,55 @@ class DatasetNormalizer:
         options = options if isinstance(options, dict) else {}
         collection_task_id = _text(options.get("collection_task_id") or options.get("task_id"))
 
+        # Platform dispatch: detect from manifest, then raw file presence.
+        platform = self._resolve_platform(manifest, raw_dir)
+        raw_names = RAW_FILE_NAMES.get(platform)
+        if raw_names is None:
+            raise McpAppError(
+                ErrorCode.NORMALIZE_FAILED,
+                f"Normalization is not supported for platform {platform!r}",
+                f"dataset_id={dataset_id} platforms={manifest.get('platforms') if isinstance(manifest, dict) else None}",
+            )
+        contents_path = raw_dir / raw_names["contents"]
+        comments_path = raw_dir / raw_names["comments"]
+        if not contents_path.exists() and not comments_path.exists():
+            raise McpAppError(
+                ErrorCode.NORMALIZE_FAILED,
+                f"No raw {platform} JSONL files found",
+                f"Expected {contents_path} or {comments_path}",
+            )
+
         raw_content_items = _read_jsonl(contents_path) if contents_path.exists() else []
-        content_rows = [_normalize_content(dataset_id, item, collection_task_id) for item in raw_content_items]
-        content_rows = _dedupe_contents(content_rows)
-        source_keyword_by_content = {
-            row["content_id"]: row["source_keyword"]
-            for row in content_rows
-            if row["content_id"] and row["source_keyword"]
-        }
-        raw_comment_items = _flatten_comment_items(_read_jsonl(comments_path)) if comments_path.exists() else []
-        comment_rows = [
-            _normalize_comment(dataset_id, item, source_keyword_by_content, collection_task_id)
-            for item in raw_comment_items
-        ]
-        comment_rows = _dedupe_comments(comment_rows)
+        if platform == "douyin":
+            content_rows = [_normalize_douyin_content(dataset_id, item, collection_task_id) for item in raw_content_items]
+            content_rows = _dedupe_contents(content_rows)
+            source_keyword_by_content = {
+                row["content_id"]: row["source_keyword"]
+                for row in content_rows
+                if row["content_id"] and row["source_keyword"]
+            }
+            raw_comment_items = _read_jsonl(comments_path) if comments_path.exists() else []
+            comment_rows = [
+                _normalize_douyin_comment(dataset_id, item, source_keyword_by_content, collection_task_id)
+                for item in raw_comment_items
+            ]
+            comment_rows = _dedupe_comments(comment_rows)
+        else:
+            content_rows = [_normalize_content(dataset_id, item, collection_task_id) for item in raw_content_items]
+            content_rows = _dedupe_contents(content_rows)
+            source_keyword_by_content = {
+                row["content_id"]: row["source_keyword"]
+                for row in content_rows
+                if row["content_id"] and row["source_keyword"]
+            }
+            raw_comment_items = _flatten_comment_items(_read_jsonl(comments_path)) if comments_path.exists() else []
+            comment_rows = [
+                _normalize_comment(dataset_id, item, source_keyword_by_content, collection_task_id)
+                for item in raw_comment_items
+            ]
+            comment_rows = _dedupe_comments(comment_rows)
+
+        orphan_count, lineage_anomaly_count = _normalize_diagnostics(content_rows, comment_rows)
 
         duckdb_path = dataset_dir / "analysis.duckdb"
         if duckdb_path.exists() and force:
@@ -580,4 +797,28 @@ class DatasetNormalizer:
             "raw_comment_count": len(raw_comment_items),
             "deduplicated_content_count": len(raw_content_items) - len(content_rows),
             "deduplicated_comment_count": len(raw_comment_items) - len(comment_rows),
+            "orphan_comment_count": orphan_count,
+            "reply_lineage_anomaly_count": lineage_anomaly_count,
         }
+
+    @staticmethod
+    def _resolve_platform(manifest: dict[str, Any], raw_dir: Path) -> str:
+        """Determine the platform for normalization.
+
+        Prefer the manifest's ``platforms`` list.  When absent, probe raw file
+        presence so existing XHS datasets without an explicit platform keep
+        working.  Unknown platforms are returned as-is so the caller raises a
+        clear error instead of silently falling back to XHS.
+        """
+        platforms = manifest.get("platforms") if isinstance(manifest, dict) else None
+        if platforms and isinstance(platforms, list):
+            for candidate in platforms:
+                if candidate in RAW_FILE_NAMES:
+                    return candidate
+            first = platforms[0] if platforms else ""
+            return _text(first) or "unknown"
+        # Manifest-less fallback (utility bundles): probe raw files.
+        for platform, names in RAW_FILE_NAMES.items():
+            if (raw_dir / names["contents"]).exists() or (raw_dir / names["comments"]).exists():
+                return platform
+        return "unknown"
