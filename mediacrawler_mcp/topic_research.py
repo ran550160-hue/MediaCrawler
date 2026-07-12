@@ -15,6 +15,7 @@ import duckdb
 
 from mediacrawler_mcp.errors import ErrorCode, McpAppError
 from mediacrawler_mcp.storage import Storage
+from mediacrawler_mcp.utils import strip_sensitive_url_params
 from mediacrawler_mcp.utils import make_report_id, utc_now_iso
 
 
@@ -152,7 +153,7 @@ def _safe_url(value: Any) -> str | None:
     url = str(value or "").strip()
     if not url or urlparse(url).scheme.lower() not in {"http", "https"}:
         return None
-    return url
+    return strip_sensitive_url_params(url)
 
 
 def _is_reply(comment: dict[str, Any]) -> bool:

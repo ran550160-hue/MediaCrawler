@@ -16,7 +16,7 @@ except Exception:  # pragma: no cover - import-time optional dependency guard
 
 from mediacrawler_mcp.errors import ErrorCode, McpAppError
 from mediacrawler_mcp.storage import Storage
-from mediacrawler_mcp.utils import make_report_id, utc_now_iso
+from mediacrawler_mcp.utils import make_report_id, strip_sensitive_url_params, utc_now_iso
 
 
 AD_KEYWORDS = ("私信", "进群", "课程", "训练营", "资料包", "领取", "加我", "变现")
@@ -111,6 +111,7 @@ def _top_contents(conn: duckdb.DuckDBPyConnection, top_n: int) -> list[dict[str,
     results = [dict(zip(columns, row)) for row in rows]
     for result in results:
         result["tags"] = _parse_tags(result.get("tags"))
+        result["url"] = strip_sensitive_url_params(result.get("url"))
     return results
 
 
@@ -246,7 +247,10 @@ def _ad_candidates(conn: duckdb.DuckDBPyConnection, limit: int = 20) -> list[dic
         params + [limit],
     ).fetchall()
     columns = ("content_id", "title", "url", "source_keyword", "engagement_count")
-    return [dict(zip(columns, row)) for row in rows]
+    results = [dict(zip(columns, row)) for row in rows]
+    for result in results:
+        result["url"] = strip_sensitive_url_params(result.get("url"))
+    return results
 
 
 def _markdown_table(rows: list[dict[str, Any]], columns: list[str]) -> str:

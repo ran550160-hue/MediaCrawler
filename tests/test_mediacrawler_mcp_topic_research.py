@@ -304,3 +304,39 @@ def test_finalize_local_xhs_search_generates_real_topic_report_after_mocked_loca
     assert result["report_type"] == "topic_research"
     assert result["report"]["summary"]["report_type"] == "topic_research"
     assert Path(result["report"]["summary_json_path"]).exists()
+
+
+def test_topic_research_strips_xsec_token_from_evidence_urls(tmp_path):
+    contents = [
+        {
+            "note_id": "n1",
+            "note_url": "https://www.xiaohongshu.com/explore/n1?xsec_token=SECRET_AB123&xsec_source=pc_search",
+            "title": "AI 编程工具",
+            "desc": "好用",
+            "user_id": "author-a",
+            "source_keyword": "AI 编程",
+            "liked_count": "100",
+            "collected_count": "20",
+            "comment_count": "3",
+            "share_count": "4",
+        }
+    ]
+    comments = [
+        {"note_id": "n1", "comment_id": "c1", "content": "推荐", "user_id": "reader-1", "like_count": "8"}
+    ]
+    dataset, research = _dataset_with_rows(tmp_path, contents, comments)
+
+    result = research.generate_topic_research_report(dataset.dataset_id)
+    summary = result["summary"]
+    html_report = Path(result["report_html_path"]).read_text(encoding="utf-8")
+    markdown_report = Path(result["report_md_path"]).read_text(encoding="utf-8")
+    summary_json = json.dumps(summary, ensure_ascii=False)
+
+    for forbidden in ("xsec_token", "SECRET_AB123"):
+        assert forbidden not in summary_json, f"{forbidden} found in topic research summary"
+        assert forbidden not in html_report, f"{forbidden} found in topic research HTML"
+        assert forbidden not in markdown_report, f"{forbidden} found in topic research markdown"
+
+    # Stable URL path is preserved
+    assert "https://www.xiaohongshu.com/explore/n1" in summary_json
+    assert "xsec_source=pc_search" in summary_json

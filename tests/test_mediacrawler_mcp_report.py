@@ -9,6 +9,7 @@ from mediacrawler_mcp.errors import ErrorCode, McpAppError
 from mediacrawler_mcp.normalizer import DatasetNormalizer
 from mediacrawler_mcp.report_service import ReportService
 from mediacrawler_mcp.storage import Storage
+from mediacrawler_mcp.utils import strip_sensitive_url_params
 
 
 def _services(tmp_path):
@@ -179,3 +180,95 @@ def test_get_report_returns_dataset_not_found(tmp_path):
         report_service.get_report("missing")
 
     assert exc_info.value.code == ErrorCode.DATASET_NOT_FOUND
+
+
+def test_strip_sensitive_url_params_preserves_path_strips_tokens():
+    # XHS URL with xsec_token query param
+    url = "https://www.xiaohongshu.com/explore/abc123?xsec_token=AB8V35PN2b_eH801FzmQy7lewWVnDICAMN&xsec_source=pc_search"
+    result = strip_sensitive_url_params(url)
+    assert "xsec_token" not in result
+    assert "xsec_source=pc_search" in result
+    assert result.startswith("https://www.xiaohongshu.com/explore/abc123")
+
+    # Douyin URL with no query params stays unchanged
+    assert strip_sensitive_url_params("https://www.douyin.com/video/123") == "https://www.douyin.com/video/123"
+
+    # None passthrough
+    assert strip_sensitive_url_params(None) is None
+
+    # Non-http scheme is returned as-is (callers reject separately)
+    assert strip_sensitive_url_params("javascript:alert(1)") == "javascript:alert(1)"
+
+    # Multiple sensitive params all removed
+    url2 = "https://example.test/page?token=secret&msToken=xyz&a_bogus=abc&keep=this"
+    result2 = strip_sensitive_url_params(url2)
+    assert "token=" not in result2
+    assert "msToken=" not in result2
+    assert "a_bogus=" not in result2
+    assert "keep=this" in result2
+
+
+def test_report_strips_xsec_token_from_all_output_formats(tmp_path):
+    dataset_service, normalizer, report_service = _services(tmp_path)
+    dataset = dataset_service.create_dataset(
+        name="URL安全报告",
+        platforms=["xhs"],
+        keywords=["测试"],
+    )
+    raw_dir = tmp_path / "datasets" / dataset.dataset_id / "raw"
+    _write_jsonl(
+        raw_dir / "xhs_contents.jsonl",
+        [
+            {
+                "note_id": "n1",
+                "note_url": "https://www.xiaohongshu.com/explore/n1?xsec_token=SECRET_TOKEN_VALUE&xsec_source=pc_search",
+                "title": "私信领取资料包",
+                "desc": "广告内容",
+                "nickname": "作者A",
+                "user_id": "u1",
+                "liked_count": "100",
+                "collected_count": "20",
+                "comment_count": "10",
+                "share_count": "5",
+                "source_keyword": "测试",
+            },
+        ],
+    )
+    _write_jsonl(
+        raw_dir / "xhs_comments.jsonl",
+        [
+            {
+                "note_id": "n1",
+                "comment_id": "c1",
+                "content": "评论",
+                "nickname": "用户A",
+                "user_id": "cu1",
+                "like_count": "9",
+                "source_keyword": "测试",
+            },
+        ],
+    )
+    normalizer.normalize_dataset(dataset.dataset_id)
+
+    result = report_service.generate_report(dataset.dataset_id, top_n=10)
+
+    summary = json.loads(Path(result["summary_json_path"]).read_text(encoding="utf-8"))
+    md_text = Path(result["report_md_path"]).read_text(encoding="utf-8")
+    html_text = Path(result["report_html_path"]).read_text(encoding="utf-8")
+
+    # Check URL fields specifically (the test tmpdir name itself contains xsec_token)
+    for item in summary.get("top_contents", []) + summary.get("ad_candidates", []):
+        url = item.get("url", "")
+        assert "xsec_token" not in url, f"xsec_token in top_contents/ad_candidates url: {url}"
+        assert "SECRET_TOKEN_VALUE" not in url, f"secret value in url: {url}"
+
+    # Markdown and HTML must not leak the secret token value
+    assert "SECRET_TOKEN_VALUE" not in md_text
+    assert "SECRET_TOKEN_VALUE" not in html_text
+    # The token query param name must not appear as a URL query key
+    assert "xsec_token=" not in md_text
+    assert "xsec_token=" not in html_text
+
+    # Stable path preserved
+    assert "https://www.xiaohongshu.com/explore/n1" in json.dumps(summary["top_contents"])
+    assert "xsec_source=pc_search" in json.dumps(summary)
