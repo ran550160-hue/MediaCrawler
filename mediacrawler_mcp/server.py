@@ -764,19 +764,11 @@ def finalize_local_douyin_search(
         if not dataset_dir:
             raise McpAppError(ErrorCode.INVALID_ARGUMENT, "Local finalize did not return dataset_dir")
 
-        registered = _importer().register_dataset(dataset_dir=dataset_dir, import_mode="link")
-        dataset_id = registered["dataset_id"]
-        normalized = None
-        if normalize:
-            normalized = DatasetNormalizer(_storage()).normalize_dataset(dataset_id, force=True)
-
         result = {
+            **finalized,
             "task_id": task_id,
-            "dataset_id": dataset_id,
+            "dataset_id": finalized.get("dataset_id"),
             "dataset_dir": dataset_dir,
-            "local_finalize": finalized,
-            "registered": registered,
-            "normalized": normalized,
             "report_type": "none",
             "report": None,
         }

@@ -165,7 +165,16 @@ class CrawlerManager:
             await self._push_log(entry)
 
             try:
-                self.process.send_signal(signal.SIGTERM)
+                if os.name == "nt":
+                    subprocess.run(
+                        ["taskkill", "/PID", str(self.process.pid), "/T", "/F"],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        check=False,
+                        timeout=10,
+                    )
+                else:
+                    self.process.send_signal(signal.SIGTERM)
 
                 # Wait for graceful exit (up to 15 seconds)
                 for _ in range(30):

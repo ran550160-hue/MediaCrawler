@@ -234,6 +234,41 @@ class Storage:
             rows = conn.execute(sql, params).fetchall()
         return [dict(row) for row in rows]
 
+    def find_dataset_row_by_collection_task_id(
+        self,
+        collection_task_id: str,
+        platform: str | None = None,
+    ) -> dict[str, Any] | None:
+        collection_task_id = (collection_task_id or "").strip()
+        if not collection_task_id:
+            return None
+
+        where = ["options_json LIKE ?"]
+        params: list[Any] = [f"%{collection_task_id}%"]
+        if platform:
+            where.append("platforms_json LIKE ?")
+            params.append(f"%{platform.strip().lower()}%")
+
+        sql = (
+            "SELECT * FROM datasets WHERE "
+            + " AND ".join(where)
+            + " ORDER BY created_at ASC, dataset_id ASC"
+        )
+        with self.connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+
+        for row in rows:
+            payload = dict(row)
+            try:
+                options = json.loads(payload.get("options_json") or "{}")
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(options, dict):
+                continue
+            if str(options.get("collection_task_id") or options.get("task_id") or "").strip() == collection_task_id:
+                return payload
+        return None
+
     def upsert_report(
         self,
         report_id: str,

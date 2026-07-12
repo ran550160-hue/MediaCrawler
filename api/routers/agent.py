@@ -10,6 +10,7 @@ from typing import Any, Optional
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 
 from mediacrawler_mcp.dataset_bundle_exporter import DatasetBundleExporter
+from mediacrawler_mcp.douyin_finalize import finalize_douyin_collection_task
 from mediacrawler_mcp.errors import McpAppError
 
 from ..schemas import (
@@ -160,10 +161,12 @@ async def _stop_active_task(task: dict[str, Any], reason: str) -> None:
         _current_task_id = None
 
     progress = _task_progress(task)
-    task["status"] = "partial_success" if progress["has_output"] else "failed"
+    target_reached = reason == "target_reached" and progress["has_output"]
+    task["status"] = "completed" if target_reached else ("partial_success" if progress["has_output"] else "failed")
     task["completed_at"] = datetime.now()
-    task["exit_code"] = crawler_manager.last_exit_code
-    task["message"] = f"Local XHS search stopped: {reason}"
+    task["exit_code"] = 0 if target_reached else crawler_manager.last_exit_code
+    platform_label = "Douyin" if task.get("platform") == "douyin" else "XHS"
+    task["message"] = f"Local {platform_label} search stopped: {reason}"
     task["stop_reason"] = reason
 
 
@@ -517,8 +520,10 @@ async def finalize_agent_task(task_id: str, request: AgentTaskFinalizeRequest):
     if not task:
         raise HTTPException(status_code=404, detail="Agent task not found")
 
+    platform = task.get("platform", "xhs")
+
     # Idempotency: return existing finalized result without re-exporting
-    if task.get("finalized"):
+    if platform != "douyin" and task.get("finalized"):
         return {"status": "success", "already_finalized": True, **task["finalized"]}
 
     await _apply_runtime_guards(task)
@@ -538,11 +543,10 @@ async def finalize_agent_task(task_id: str, request: AgentTaskFinalizeRequest):
     if status not in FINALIZABLE_STATUSES and not (request.force and progress["has_output"]):
         raise HTTPException(status_code=409, detail=f"Task is not ready to finalize: {status}")
 
-    platform = task.get("platform", "xhs")
     candidates = _candidate_jsonl_files(task)
     contents_path = candidates["contents"]
     comments_path = candidates["comments"]
-    if not contents_path and not comments_path:
+    if platform != "douyin" and not contents_path and not comments_path:
         raise HTTPException(status_code=404, detail="No JSONL output files found for this task")
 
     dataset_name = request.dataset_name or task.get("dataset_name") or f"{'Douyin' if platform == 'douyin' else 'XHS'} search {' '.join(task['keywords'])}"
@@ -550,10 +554,10 @@ async def finalize_agent_task(task_id: str, request: AgentTaskFinalizeRequest):
 
     try:
         if platform == "douyin":
-            if not contents_path:
-                raise HTTPException(status_code=404, detail="No Douyin contents JSONL file found for this task")
             discovery = _douyin_discover_output(task)
-            result = DatasetBundleExporter().export_douyin_bundle(
+            completed_at = task.get("completed_at") or datetime.now()
+            result = finalize_douyin_collection_task(
+                task_id=task_id,
                 name=dataset_name,
                 output_dir=Path(request.output_dir),
                 keywords=task["keywords"],
@@ -563,6 +567,7 @@ async def finalize_agent_task(task_id: str, request: AgentTaskFinalizeRequest):
                 crawler_type="search",
                 description=description,
                 collection_started_at=task["started_at"].isoformat(),
+                collection_completed_at=completed_at.isoformat(),
                 dataset_id=request.dataset_id,
             )
         else:
@@ -581,6 +586,8 @@ async def finalize_agent_task(task_id: str, request: AgentTaskFinalizeRequest):
                 collection_completed_at=(task.get("completed_at") or datetime.now()).isoformat(),
             )
     except McpAppError as exc:
+        if exc.message == "No Douyin contents JSONL file found for this task":
+            raise HTTPException(status_code=404, detail=exc.message) from exc
         raise HTTPException(status_code=400, detail=exc.to_result()) from exc
 
     task["finalized"] = result

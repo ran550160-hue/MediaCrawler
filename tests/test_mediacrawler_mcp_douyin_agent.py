@@ -1,4 +1,5 @@
 import json
+import importlib
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -11,6 +12,8 @@ from api.main import app
 from api.schemas import CrawlerStartRequest, CrawlerTypeEnum, LoginTypeEnum, PlatformEnum, SaveDataOptionEnum
 from api.services.crawler_manager import CrawlerManager
 from mediacrawler_mcp import server
+
+crawler_manager_module = importlib.import_module("api.services.crawler_manager")
 
 
 # ---------------------------------------------------------------------------
@@ -106,13 +109,15 @@ def test_douyin_command_no_sensitive_fields():
 # ---------------------------------------------------------------------------
 
 @pytest.fixture(autouse=True)
-def _clean_tasks(monkeypatch):
+def _clean_tasks(monkeypatch, tmp_path):
+    monkeypatch.setenv("MEDIACRAWLER_MCP_HOME", str(tmp_path / "mcp_home"))
     agent_router._tasks.clear()
     agent_router._current_task_id = None
     agent_router.crawler_manager.process = None
     agent_router.crawler_manager.status = "idle"
     agent_router.crawler_manager.last_exit_code = None
     agent_router.crawler_manager._logs = []
+    server._FINALIZED_DOUYIN.clear()
     # Patch get_file_info so test tmp files outside DATA_DIR don't cause ValueError
     def _safe_file_info(path):
         return {
@@ -126,6 +131,7 @@ def _clean_tasks(monkeypatch):
     yield
     agent_router._tasks.clear()
     agent_router._current_task_id = None
+    server._FINALIZED_DOUYIN.clear()
 
 
 def test_start_douyin_returns_task_id(monkeypatch):
@@ -286,6 +292,37 @@ def _make_task(tmp_path, task_id="agent_douyin_test_001", run_id="run_test_001",
     return task
 
 
+def _dataset_bundle_dirs(*roots):
+    dirs = []
+    for root in roots:
+        root = Path(root)
+        if not root.exists():
+            continue
+        dirs.extend(path for path in root.iterdir() if path.is_dir() and (path / "dataset.json").exists())
+    return dirs
+
+
+def _patch_server_client_to_api(monkeypatch, client, output_dir):
+    class ApiBackedClient:
+        def __init__(self, base_url=None):
+            pass
+
+        def finalize_task(self, task_id, dataset_name="", description="", force=False):
+            response = client.post(
+                f"/api/agent/tasks/{task_id}/finalize",
+                json={
+                    "dataset_name": dataset_name,
+                    "description": description,
+                    "output_dir": str(output_dir),
+                    "force": force,
+                },
+            )
+            assert response.status_code == 200, response.text
+            return response.json()
+
+    monkeypatch.setattr(server, "DesktopAgentClient", ApiBackedClient)
+
+
 def test_finalize_discovers_run_isolated_douyin_output(tmp_path):
     _make_task(tmp_path)
     client = TestClient(app)
@@ -358,32 +395,17 @@ def test_finalize_normalizes(tmp_path):
     _make_task(tmp_path)
     client = TestClient(app)
     response = client.post("/api/agent/tasks/agent_douyin_test_001/finalize", json={"output_dir": str(tmp_path / "bundle_out")})
-    # The agent finalize returns the bundle; MCP-level finalize would normalize.
-    # Here we test that the agent finalize returns a valid bundle dir.
     data = response.json()
     assert data["status"] == "success"
-    assert "dataset_dir" in data
+    assert data["normalized"]["content_count"] == 1
+    assert data["normalized"]["comment_count"] == 1
 
 
 def test_finalize_returns_counts_and_diagnostics(tmp_path):
-    """Test that the MCP-level finalize returns normalize diagnostics."""
     _make_task(tmp_path)
     client = TestClient(app)
-    # First get the bundle from agent finalize
     response = client.post("/api/agent/tasks/agent_douyin_test_001/finalize", json={"output_dir": str(tmp_path / "bundle_out")})
-    bundle_dir = Path(response.json()["dataset_dir"])
-    # The agent finalize returns bundle info; MCP finalize adds normalize
-    from mediacrawler_mcp.config import McpConfig
-    from mediacrawler_mcp.dataset_importer import DatasetImporter
-    from mediacrawler_mcp.normalizer import DatasetNormalizer
-    from mediacrawler_mcp.storage import Storage
-    config = McpConfig(home=tmp_path / "mcp_home", browser_mode="persistent_context", cdp_endpoint=None, max_concurrent_tasks=1, default_timeout_seconds=300)
-    storage = Storage(config)
-    storage.initialize()
-    importer = DatasetImporter(config, storage)
-    registered = importer.register_dataset(dataset_dir=str(bundle_dir), import_mode="copy")
-    dataset_id = registered["dataset_id"]
-    summary = DatasetNormalizer(storage).normalize_dataset(dataset_id, force=True)
+    summary = response.json()["normalized"]
     assert summary["content_count"] == 1
     assert summary["comment_count"] == 1
     assert "orphan_comment_count" in summary
@@ -398,6 +420,7 @@ def test_finalize_writes_platform_douyin(tmp_path):
     bundle_dir = Path(data["dataset_dir"])
     manifest = json.loads((bundle_dir / "dataset.json").read_text(encoding="utf-8"))
     assert manifest.get("platforms") == ["douyin"]
+    assert manifest["options"]["collection_task_id"] == "agent_douyin_test_001"
 
 
 def test_finalize_default_no_report():
@@ -430,13 +453,128 @@ def test_finalize_topic_research_unsupported(monkeypatch):
 def test_finalize_repeat_is_idempotent(tmp_path):
     _make_task(tmp_path)
     client = TestClient(app)
-    r1 = client.post("/api/agent/tasks/agent_douyin_test_001/finalize", json={"output_dir": str(tmp_path / "bundle_a")})
+    bundle_a = tmp_path / "bundle_a"
+    bundle_b = tmp_path / "bundle_b"
+    r1 = client.post("/api/agent/tasks/agent_douyin_test_001/finalize", json={"output_dir": str(bundle_a)})
     assert r1.status_code == 200
-    r2 = client.post("/api/agent/tasks/agent_douyin_test_001/finalize", json={"output_dir": str(tmp_path / "bundle_b")})
+    r2 = client.post("/api/agent/tasks/agent_douyin_test_001/finalize", json={"output_dir": str(bundle_b)})
     assert r2.status_code == 200
     assert r2.json().get("already_finalized") is True
-    # Same dataset_dir, not a second bundle
+    assert r2.json()["dataset_id"] == r1.json()["dataset_id"]
     assert r2.json()["dataset_dir"] == r1.json()["dataset_dir"]
+    assert len(_dataset_bundle_dirs(bundle_a, bundle_b)) == 1
+
+
+def test_api_after_mcp_finalize_returns_same_dataset(tmp_path, monkeypatch):
+    task_id = "agent_douyin_mcp_first_001"
+    _make_task(tmp_path, task_id=task_id)
+    client = TestClient(app)
+    bundle_a = tmp_path / "bundle_a"
+    bundle_b = tmp_path / "bundle_b"
+    _patch_server_client_to_api(monkeypatch, client, bundle_a)
+
+    mcp_result = server.finalize_local_douyin_search(task_id)
+    api_response = client.post(f"/api/agent/tasks/{task_id}/finalize", json={"output_dir": str(bundle_b)})
+
+    assert mcp_result["status"] == "success"
+    assert api_response.status_code == 200
+    api_result = api_response.json()
+    assert api_result.get("already_finalized") is True
+    assert api_result["dataset_id"] == mcp_result["dataset_id"]
+    assert len(_dataset_bundle_dirs(bundle_a, bundle_b)) == 1
+
+
+def test_mcp_after_api_finalize_returns_same_dataset(tmp_path, monkeypatch):
+    task_id = "agent_douyin_api_first_001"
+    _make_task(tmp_path, task_id=task_id)
+    client = TestClient(app)
+    bundle_a = tmp_path / "bundle_a"
+    bundle_b = tmp_path / "bundle_b"
+
+    api_first = client.post(f"/api/agent/tasks/{task_id}/finalize", json={"output_dir": str(bundle_a)})
+    assert api_first.status_code == 200
+    _patch_server_client_to_api(monkeypatch, client, bundle_b)
+    mcp_result = server.finalize_local_douyin_search(task_id)
+
+    assert mcp_result["status"] == "success"
+    assert mcp_result.get("already_finalized") is True
+    assert mcp_result["dataset_id"] == api_first.json()["dataset_id"]
+    assert len(_dataset_bundle_dirs(bundle_a, bundle_b)) == 1
+
+
+def test_mcp_finalize_after_cache_clear_uses_registry(tmp_path, monkeypatch):
+    task_id = "agent_douyin_cache_clear_001"
+    _make_task(tmp_path, task_id=task_id)
+    client = TestClient(app)
+    bundle_root = tmp_path / "bundle_out"
+    _patch_server_client_to_api(monkeypatch, client, bundle_root)
+
+    first = server.finalize_local_douyin_search(task_id)
+    server._FINALIZED_DOUYIN.clear()
+    second = server.finalize_local_douyin_search(task_id)
+
+    assert first["status"] == "success"
+    assert second["status"] == "success"
+    assert second.get("already_finalized") is True
+    assert second["dataset_id"] == first["dataset_id"]
+    assert len(_dataset_bundle_dirs(bundle_root)) == 1
+
+
+def test_douyin_finalize_rejects_unfinished_or_failed_tasks_without_output(tmp_path):
+    client = TestClient(app)
+    for status in ["running", "failed", "cancelled"]:
+        task_id = f"agent_douyin_{status}_001"
+        task = _make_task(tmp_path, task_id=task_id, contents=False, comments=False)
+        task["status"] = status
+        response = client.post(f"/api/agent/tasks/{task_id}/finalize", json={"output_dir": str(tmp_path / f"bundle_{status}")})
+        assert response.status_code in {404, 409}
+
+
+@pytest.mark.asyncio
+async def test_douyin_target_reached_stops_as_completed(tmp_path):
+    task_id = "agent_douyin_target_reached_001"
+    task = _make_task(tmp_path, task_id=task_id)
+    task["status"] = "running"
+    agent_router._current_task_id = None
+    agent_router.crawler_manager.last_exit_code = 1
+
+    await agent_router._stop_active_task(task, "target_reached")
+
+    assert task["status"] == "completed"
+    assert task["exit_code"] == 0
+    assert task["message"] == "Local Douyin search stopped: target_reached"
+
+
+@pytest.mark.asyncio
+async def test_crawler_manager_stop_kills_windows_process_tree(monkeypatch):
+    calls = []
+
+    class FakeProcess:
+        pid = 12345
+        stopped = False
+
+        def poll(self):
+            return 1 if self.stopped else None
+
+        def kill(self):
+            raise AssertionError("taskkill should stop the Windows process tree first")
+
+    fake_process = FakeProcess()
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs))
+        fake_process.stopped = True
+
+    manager = CrawlerManager()
+    manager.process = fake_process
+    manager.status = "running"
+    monkeypatch.setattr(crawler_manager_module.os, "name", "nt")
+    monkeypatch.setattr(crawler_manager_module.subprocess, "run", fake_run)
+
+    stopped = await manager.stop()
+
+    assert stopped is True
+    assert calls[0][0] == ["taskkill", "/PID", "12345", "/T", "/F"]
 
 
 # ---------------------------------------------------------------------------
@@ -491,24 +629,15 @@ def test_finalize_local_douyin_search_registers_and_normalizes(monkeypatch):
             pass
 
         def finalize_task(self, task_id, dataset_name="", description="", force=False):
-            return {"dataset_dir": "/tmp/ds_dy", "dataset_id": "ds_dy", "files": []}
-
-    class FakeImporter:
-        def register_dataset(self, dataset_dir, import_mode="copy"):
-            assert dataset_dir == "/tmp/ds_dy"
-            return {"dataset_id": "ds_dy", "dataset_dir": dataset_dir}
-
-    class FakeNormalizer:
-        def __init__(self, storage):
-            pass
-
-        def normalize_dataset(self, dataset_id, force=False):
-            return {"content_count": 1, "comment_count": 1, "orphan_comment_count": 0, "reply_lineage_anomaly_count": 0}
+            return {
+                "dataset_dir": "/tmp/ds_dy",
+                "dataset_id": "ds_dy",
+                "registered": {"dataset_id": "ds_dy", "dataset_dir": "/tmp/ds_dy"},
+                "normalized": {"content_count": 1, "comment_count": 1, "orphan_comment_count": 0, "reply_lineage_anomaly_count": 0},
+                "files": [],
+            }
 
     monkeypatch.setattr(server, "DesktopAgentClient", FakeClient)
-    monkeypatch.setattr(server, "_importer", lambda: FakeImporter())
-    monkeypatch.setattr(server, "_storage", lambda: object())
-    monkeypatch.setattr(server, "DatasetNormalizer", FakeNormalizer)
 
     server._FINALIZED_DOUYIN.clear()
     result = server.finalize_local_douyin_search("agent_dy_1")
@@ -525,23 +654,9 @@ def test_finalize_local_douyin_search_idempotent(monkeypatch):
             pass
 
         def finalize_task(self, task_id, dataset_name="", description="", force=False):
-            return {"dataset_dir": "/tmp/ds_dy2", "dataset_id": "ds_dy2"}
-
-    class FakeImporter:
-        def register_dataset(self, dataset_dir, import_mode="copy"):
-            return {"dataset_id": "ds_dy2", "dataset_dir": dataset_dir}
-
-    class FakeNormalizer:
-        def __init__(self, storage):
-            pass
-
-        def normalize_dataset(self, dataset_id, force=False):
-            return {"content_count": 1}
+            return {"dataset_dir": "/tmp/ds_dy2", "dataset_id": "ds_dy2", "normalized": {"content_count": 1}}
 
     monkeypatch.setattr(server, "DesktopAgentClient", FakeClient)
-    monkeypatch.setattr(server, "_importer", lambda: FakeImporter())
-    monkeypatch.setattr(server, "_storage", lambda: object())
-    monkeypatch.setattr(server, "DatasetNormalizer", FakeNormalizer)
 
     server._FINALIZED_DOUYIN.clear()
     r1 = server.finalize_local_douyin_search("agent_dy_idem")
