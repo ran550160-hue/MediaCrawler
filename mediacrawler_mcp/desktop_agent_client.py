@@ -189,6 +189,7 @@ class DesktopAgentClient:
         dataset_name: str = "",
         description: str = "",
         force: bool = False,
+        report_type: str = "none",
     ) -> dict[str, Any]:
         return convert_windows_paths(
             self._request(
@@ -198,6 +199,7 @@ class DesktopAgentClient:
                     "dataset_name": dataset_name,
                     "description": description,
                     "force": force,
+                    "report_type": report_type,
                 },
             )
         )

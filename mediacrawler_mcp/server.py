@@ -735,20 +735,14 @@ def finalize_local_douyin_search(
     force: bool = False,
     base_url: str = "http://127.0.0.1:8080",
 ) -> dict[str, Any]:
-    """Finalize a local Douyin search; report_type must be none (topic research not yet supported)."""
+    """Finalize a local Douyin search, optionally generating a topic research report."""
     try:
         report_type = (report_type or "none").strip().lower()
-        if report_type == "topic_research":
-            raise McpAppError(
-                ErrorCode.INVALID_ARGUMENT,
-                "Douyin topic research reports are not yet supported",
-                "Use report_type='none' for Douyin; topic research will be added in a future PR",
-            )
-        if report_type not in {"none"}:
-            raise McpAppError(ErrorCode.INVALID_ARGUMENT, "Invalid report type", "report_type must be 'none' for Douyin")
+        if report_type not in {"none", "topic_research"}:
+            raise McpAppError(ErrorCode.INVALID_ARGUMENT, "Invalid report type", "report_type must be 'none' or 'topic_research' for Douyin")
 
         # Idempotency: return cached result on repeat finalize
-        if task_id in _FINALIZED_DOUYIN:
+        if task_id in _FINALIZED_DOUYIN and (report_type == "none" or _FINALIZED_DOUYIN[task_id].get("report_type") == "topic_research"):
             cached = dict(_FINALIZED_DOUYIN[task_id])
             cached["already_finalized"] = True
             return success_result(**cached)
@@ -759,6 +753,7 @@ def finalize_local_douyin_search(
             dataset_name=dataset_name,
             description=description,
             force=force,
+            report_type=report_type,
         )
         dataset_dir = finalized.get("dataset_dir")
         if not dataset_dir:
@@ -769,8 +764,8 @@ def finalize_local_douyin_search(
             "task_id": task_id,
             "dataset_id": finalized.get("dataset_id"),
             "dataset_dir": dataset_dir,
-            "report_type": "none",
-            "report": None,
+            "report_type": finalized.get("report_type", report_type),
+            "report": finalized.get("report"),
         }
         _FINALIZED_DOUYIN[task_id] = result
         return success_result(**result)

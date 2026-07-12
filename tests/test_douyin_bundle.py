@@ -186,6 +186,23 @@ def test_douyin_bundle_refuses_mismatched_aweme_linkage(tmp_path):
     assert exc_info.value.code == ErrorCode.INVALID_ARGUMENT
 
 
+def test_douyin_bundle_rejects_partial_jsonl_line(tmp_path):
+    contents_path = tmp_path / "inputs" / "contents.jsonl"
+    contents_path.parent.mkdir(parents=True, exist_ok=True)
+    contents_path.write_text('{"aweme_id":"ok"}\n{"aweme_id":', encoding="utf-8")
+
+    with pytest.raises(McpAppError) as exc_info:
+        DatasetBundleExporter().export_douyin_bundle(
+            name="partial-jsonl",
+            output_dir=tmp_path / "inbox",
+            keywords=["k"],
+            contents_path=contents_path,
+        )
+
+    assert exc_info.value.code == ErrorCode.INVALID_ARGUMENT
+    assert "Malformed Douyin contents JSONL input" == exc_info.value.message
+
+
 def test_douyin_bundle_rejects_merged_multiple_runs(tmp_path):
     _make_bundle(tmp_path, dataset_id="dy_unique", run_id="run_one")
     with pytest.raises(McpAppError) as exc_info:

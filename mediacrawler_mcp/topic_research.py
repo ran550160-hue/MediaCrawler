@@ -16,7 +16,7 @@ import duckdb
 from mediacrawler_mcp.errors import ErrorCode, McpAppError
 from mediacrawler_mcp.storage import Storage
 from mediacrawler_mcp.utils import strip_sensitive_url_params
-from mediacrawler_mcp.utils import make_report_id, utc_now_iso
+from mediacrawler_mcp.utils import utc_now_iso
 
 
 POSITIVE_MARKERS = ("推荐", "喜欢", "好用", "满意", "值得", "靠谱", "有用", "不错")
@@ -27,6 +27,8 @@ NEGATED_POSITIVE_MARKERS = ("不推荐", "不太好用", "不怎么好用", "不
 NEGATED_NEGATIVE_MARKERS = ("不是很贵", "不贵", "没那么贵")
 TEXT_NORMALIZE_PATTERN = re.compile(r"[^0-9a-zA-Z\u4e00-\u9fff]+")
 INVALID_TOPIC_TAG_PATTERN = re.compile(r"^(?:\d+|\d{1,2}:\d{2}(?::\d{2})?)$")
+DOUYIN_HASHTAG_PATTERN = re.compile(r"#([^\s#，。！？!?；;：:、,.()（）\[\]{}<>\"'`~|/\\\\]+)")
+TOPIC_TRAILING_PUNCTUATION = "，。！？!?；;：:、,.()（）[]{}<>\"'`~|/\\"
 NEAR_DUPLICATE_THRESHOLD = 0.92
 MAX_UNIQUE_TEXTS_CHECKED = 300
 REQUIRED_CONTENT_COLUMNS = {
@@ -106,7 +108,27 @@ def duplicate_statistics(records: list[dict[str, Any]], text_key: str) -> dict[s
     }
 
 
-def _first_topic(content: dict[str, Any]) -> str:
+def _normalize_topic_tag(value: Any) -> str | None:
+    text = str(value or "").strip().lstrip("#").strip().rstrip(TOPIC_TRAILING_PUNCTUATION).strip()
+    if not text or INVALID_TOPIC_TAG_PATTERN.fullmatch(text):
+        return None
+    if not any(char.isalnum() or "\u4e00" <= char <= "\u9fff" for char in text):
+        return None
+    return text
+
+
+def _first_douyin_hashtag(content: dict[str, Any]) -> str | None:
+    for field in ("title", "content_text"):
+        for match in DOUYIN_HASHTAG_PATTERN.finditer(str(content.get(field) or "")):
+            topic = _normalize_topic_tag(match.group(1))
+            if topic:
+                return topic
+    return None
+
+
+def _first_topic(content: dict[str, Any], platform: str = "xhs") -> str:
+    if platform == "douyin":
+        return _first_douyin_hashtag(content) or str(content.get("source_keyword") or "未分类").strip() or "未分类"
     raw_tags = content.get("tags") or "[]"
     try:
         tags = json.loads(raw_tags) if isinstance(raw_tags, str) else raw_tags
@@ -114,8 +136,8 @@ def _first_topic(content: dict[str, Any]) -> str:
         tags = []
     if isinstance(tags, list):
         for tag in tags:
-            text = str(tag or "").strip()
-            if text and not INVALID_TOPIC_TAG_PATTERN.fullmatch(text):
+            text = _normalize_topic_tag(tag)
+            if text:
                 return text
     return str(content.get("source_keyword") or "未分类").strip() or "未分类"
 
@@ -160,8 +182,8 @@ def _is_reply(comment: dict[str, Any]) -> bool:
     return str(comment.get("parent_comment_id") or "").strip() not in {"", "0", "None", "null"}
 
 
-def _evidence_from_content(content: dict[str, Any], dataset_id: str) -> dict[str, Any]:
-    return {
+def _evidence_from_content(content: dict[str, Any], dataset_id: str, platform: str) -> dict[str, Any]:
+    evidence = {
         "content_id": content["content_id"],
         "content_type": content.get("content_type") or "post",
         "parent_content_id": None,
@@ -175,9 +197,37 @@ def _evidence_from_content(content: dict[str, Any], dataset_id: str) -> dict[str
         "dataset_id": dataset_id,
         "collection_task_id": content.get("collection_task_id") or "",
     }
+    if platform == "douyin":
+        evidence.update({
+            "content_text": _text_excerpt(content.get("content_text")),
+            "like_count": int(content.get("like_count") or 0),
+            "comment_count": int(content.get("comment_count") or 0),
+            "collect_count": int(content.get("collect_count") or 0),
+            "share_count": int(content.get("share_count") or 0),
+            "engagement_count": int(content.get("engagement_count") or 0),
+            "url": _safe_url(content.get("url")),
+            "source_keyword": content.get("source_keyword") or "",
+        })
+    return evidence
 
 
-def _evidence_from_comment(comment: dict[str, Any], parent: dict[str, Any], dataset_id: str) -> dict[str, Any]:
+def _evidence_from_comment(comment: dict[str, Any], parent: dict[str, Any], dataset_id: str, platform: str) -> dict[str, Any]:
+    if platform == "douyin":
+        return {
+            "comment_id": comment.get("comment_id") or "",
+            "content_id": comment.get("content_id") or "",
+            "parent_comment_id": comment.get("parent_comment_id") if _is_reply(comment) else None,
+            "comment_text": _text_excerpt(comment.get("comment_text")),
+            "user_id": comment.get("user_id") or "",
+            "like_count": int(comment.get("like_count") or 0),
+            "published_at": _as_iso(comment.get("publish_datetime")),
+            "source_keyword": comment.get("source_keyword") or "",
+            "content_url": _safe_url(parent.get("url")),
+            "dataset_id": dataset_id,
+            "collection_task_id": comment.get("collection_task_id") or parent.get("collection_task_id") or "",
+            "content_type": "reply" if _is_reply(comment) else "comment",
+            "view": classify_comment_view(str(comment.get("comment_text") or "")),
+        }
     return {
         "content_id": comment.get("comment_id") or "",
         "content_type": "reply" if _is_reply(comment) else "comment",
@@ -221,12 +271,26 @@ def _view_counts(comments: list[dict[str, Any]]) -> dict[str, int]:
     return {key: int(counts[key]) for key in ("positive_count", "negative_count", "mixed_count", "neutral_count", "question_count", "action_intent_count")}
 
 
-def build_topic_analysis(contents: list[dict[str, Any]], comments: list[dict[str, Any]], dataset_id: str, top_n: int = 10) -> dict[str, Any]:
+def _sorted_contents(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    ordered = sorted(rows, key=lambda row: str(row.get("content_id") or ""))
+    ordered.sort(key=lambda row: str(_as_iso(row.get("publish_datetime")) or ""), reverse=True)
+    ordered.sort(key=lambda row: int(row.get("engagement_count") or 0), reverse=True)
+    return ordered
+
+
+def _sorted_comments(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    ordered = sorted(rows, key=lambda row: str(row.get("comment_id") or ""))
+    ordered.sort(key=lambda row: str(_as_iso(row.get("publish_datetime")) or ""), reverse=True)
+    ordered.sort(key=lambda row: int(row.get("like_count") or 0), reverse=True)
+    return ordered
+
+
+def build_topic_analysis(contents: list[dict[str, Any]], comments: list[dict[str, Any]], dataset_id: str, top_n: int = 10, platform: str = "xhs") -> dict[str, Any]:
     """Build deterministic tag/source-keyword groups and traceable evidence."""
     by_content_id = {row["content_id"]: row for row in contents if row.get("content_id")}
     groups: dict[str, dict[str, Any]] = {}
     for content in contents:
-        name = _first_topic(content)
+        name = _first_topic(content, platform)
         key = normalize_analysis_text(name) or name
         groups.setdefault(key, {"name": name, "contents": [], "comments": []})["contents"].append(content)
     orphan_comments: list[dict[str, Any]] = []
@@ -235,7 +299,7 @@ def build_topic_analysis(contents: list[dict[str, Any]], comments: list[dict[str
         if parent is None:
             orphan_comments.append(comment)
             continue
-        name = _first_topic(parent)
+        name = _first_topic(parent, platform)
         key = normalize_analysis_text(name) or name
         groups.setdefault(key, {"name": name, "contents": [], "comments": []})["comments"].append(comment)
 
@@ -243,17 +307,14 @@ def build_topic_analysis(contents: list[dict[str, Any]], comments: list[dict[str
     for group in groups.values():
         topic_contents = group["contents"]
         topic_comments = group["comments"]
-        representative_posts = [
-            _evidence_from_content(row, dataset_id)
-            for row in sorted(topic_contents, key=lambda row: int(row.get("engagement_count") or 0), reverse=True)[:3]
-        ]
+        representative_posts = [_evidence_from_content(row, dataset_id, platform) for row in _sorted_contents(topic_contents)[:3]]
         representative_comments = [
-            _evidence_from_comment(row, by_content_id[row["content_id"]], dataset_id)
-            for row in sorted(topic_comments, key=lambda row: int(row.get("like_count") or 0), reverse=True)[:3]
+            _evidence_from_comment(row, by_content_id[row["content_id"]], dataset_id, platform)
+            for row in _sorted_comments(topic_comments)[:3]
         ]
         classified_comments = [
-            _evidence_from_comment(row, by_content_id[row["content_id"]], dataset_id)
-            for row in sorted(topic_comments, key=lambda row: int(row.get("like_count") or 0), reverse=True)
+            _evidence_from_comment(row, by_content_id[row["content_id"]], dataset_id, platform)
+            for row in _sorted_comments(topic_comments)
         ]
         positive = next((item for item in classified_comments if item["view"]["sentiment"] == "positive"), None)
         negative = next((item for item in classified_comments if item["view"]["sentiment"] == "negative"), None)
@@ -264,16 +325,18 @@ def build_topic_analysis(contents: list[dict[str, Any]], comments: list[dict[str
         dates = Counter(_as_iso(row.get("publish_datetime"))[:10] if _as_iso(row.get("publish_datetime")) else "unknown" for row in [*topic_contents, *topic_comments])
         topics.append({
             "name": group["name"],
-            "grouping_method": "tag_then_source_keyword_deterministic_grouping",
-            "grouping_limitations": ["No semantic clustering is used.", "Different subtopics under the same search keyword can be merged.", "Grouping quality depends on source tags and search keywords."],
+            "grouping_method": "explicit_hashtag_then_source_keyword_deterministic_grouping" if platform == "douyin" else "tag_then_source_keyword_deterministic_grouping",
+            "grouping_limitations": ["No semantic clustering is used.", "Different subtopics under the same search keyword can be merged.", "Grouping quality depends on explicit tags and source keywords."],
             "description": f"标签/搜索关键词确定性分组：{len(topic_contents)} 篇帖子及其关联评论。",
             "post_count": len(topic_contents),
+            "content_count": len(topic_contents),
             "comment_count": len(topic_comments),
             "unique_author_count": len(authors),
             "total_engagement": total_interaction,
             "average_engagement": round(total_interaction / max(1, len(topic_contents) + len(topic_comments)), 2),
             "time_distribution": dict(sorted(dates.items())),
             "representative_posts": representative_posts,
+            "representative_contents": representative_posts,
             "representative_comments": representative_comments,
             "view_counts": _view_counts(topic_comments),
             "contrasting_view_examples": contrasting,
@@ -304,35 +367,52 @@ class TopicResearchService:
         if not database_path.exists():
             raise McpAppError(ErrorCode.REPORT_FAILED, "Dataset is not normalized", "Call normalize_dataset before topic research")
         manifest = self._read_manifest(dataset_dir / "dataset.json")
+        platforms = json.loads(row["platforms_json"])
+        platform = "douyin" if "douyin" in platforms else "xhs"
         with duckdb.connect(str(database_path), read_only=True) as conn:
             self._validate_schema(conn)
             contents = self._rows(conn, "SELECT * FROM contents")
             comments = self._rows(conn, "SELECT * FROM comments")
+        report_id = f"report_{dataset_id}_topic_research"
         summary = {
-            "report_id": make_report_id("topic_research"),
+            "report_id": report_id,
             "report_type": "topic_research",
             "report_capability": "可追溯的规则型主题分组与证据报告 MVP",
-            "dataset": {"dataset_id": dataset_id, "name": row["name"], "platforms": json.loads(row["platforms_json"])},
+            "platform": platform,
+            "dataset_id": dataset_id,
+            "generated_at": utc_now_iso(),
+            "dataset": {"dataset_id": dataset_id, "name": row["name"], "platforms": platforms},
             "scope": self._scope(row, manifest, contents, comments),
-            "data_quality": self._quality(dataset_dir, manifest, contents, comments),
-            "topic_analysis": build_topic_analysis(contents, comments, dataset_id, top_n),
+            "data_quality": self._quality(dataset_dir, manifest, contents, comments, platform),
+            "topic_analysis": build_topic_analysis(contents, comments, dataset_id, top_n, platform),
             "limitations": [
                 "This is deterministic tag/source-keyword grouping, not semantic topic clustering.",
                 "This report is a single dataset snapshot and does not claim a topic is rising, falling, or trending without historical snapshots or a baseline.",
                 "No LLM generated or altered counts, samples, or conclusions.",
             ],
         }
+        if platform == "douyin":
+            summary["limitations"].extend([
+                "Douyin topics come only from explicit hashtags in normalized title/content_text, then source_keyword fallback; they are not semantic clusters.",
+                "Douyin has no independently normalized hashtags or challenges field.",
+                "Douyin has no play_count or exposure_count; engagement_count is like_count + comment_count + collect_count + share_count only.",
+                "Douyin raw comments do not contain source_keyword. The normalized value is inherited from the parent content by aweme_id/content_id.",
+                "Douyin comments model root and second-level comments only; reply-to-reply lineage cannot be reconstructed.",
+                "sub_comment_count does not mean all second-level comments were collected in this run.",
+                "This is a collection snapshot, not a trend analysis, and uses no LLM or semantic inference.",
+            ])
+        summary["topics"] = summary["topic_analysis"]["topics"]
         report_dir = dataset_dir / "reports"
         report_dir.mkdir(exist_ok=True)
-        summary_path = report_dir / "topic_research.summary.json"
+        summary_path = report_dir / "topic_research.json"
         markdown_path = report_dir / "topic_research.md"
         html_path = report_dir / "topic_research.html"
-        summary["outputs"] = {"summary_json_path": str(summary_path), "report_md_path": str(markdown_path), "report_html_path": str(html_path)}
+        summary["outputs"] = {"report_json_path": str(summary_path), "summary_json_path": str(summary_path), "report_md_path": str(markdown_path), "report_html_path": str(html_path)}
         summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
         self._write_markdown(markdown_path, summary)
         self._write_html(html_path, summary)
         now = utc_now_iso()
-        self.storage.upsert_report(summary["report_id"], dataset_id, "topic_research", "success", str(markdown_path), str(html_path), str(summary_path), now, now)
+        self.storage.upsert_report(report_id, dataset_id, "topic_research", "success", str(markdown_path), str(html_path), str(summary_path), now, now)
         return {"report_id": summary["report_id"], **summary["outputs"], "summary": summary}
 
     @staticmethod
@@ -364,9 +444,10 @@ class TopicResearchService:
     def _raw_count(path: Path) -> int:
         return sum(1 for line in path.read_text(encoding="utf-8").splitlines() if line.strip()) if path.exists() else 0
 
-    def _quality(self, dataset_dir: Path, manifest: dict[str, Any], contents: list[dict[str, Any]], comments: list[dict[str, Any]]) -> dict[str, Any]:
-        raw_content_count = self._raw_count(dataset_dir / "raw" / "xhs_contents.jsonl")
-        raw_comment_count = self._raw_count(dataset_dir / "raw" / "xhs_comments.jsonl")
+    def _quality(self, dataset_dir: Path, manifest: dict[str, Any], contents: list[dict[str, Any]], comments: list[dict[str, Any]], platform: str) -> dict[str, Any]:
+        raw_prefix = "douyin" if platform == "douyin" else "xhs"
+        raw_content_count = self._raw_count(dataset_dir / "raw" / f"{raw_prefix}_contents.jsonl")
+        raw_comment_count = self._raw_count(dataset_dir / "raw" / f"{raw_prefix}_comments.jsonl")
         content_ids = {row.get("content_id") for row in contents}
         def record_key(kind: str, row: dict[str, Any], index: int) -> str:
             identifier = row.get("content_id") if kind == "content" else row.get("comment_id")
@@ -415,12 +496,14 @@ class TopicResearchService:
 
     @staticmethod
     def _markdown_evidence(item: dict[str, Any]) -> str:
-        label = f"[{item['content_type']}] {item['title'] or item['content_id']}"
-        url = _safe_url(item.get("source_url"))
+        identifier = item.get("comment_id") or item.get("content_id") or "evidence"
+        label = f"[{item.get('content_type') or 'content'}] {item.get('title') or identifier}"
+        url = _safe_url(item.get("source_url") or item.get("content_url"))
         link = f"[{label}]({url})" if url else label
-        parent = f"；父帖={item['parent_content_id']}" if item.get("parent_content_id") else ""
+        parent_id = item.get("content_id") if item.get("comment_id") else item.get("parent_content_id")
+        parent = f"；父内容={parent_id}" if parent_id else ""
         reply = f"；父评论={item['parent_comment_id']}" if item.get("parent_comment_id") else ""
-        return f"- {link}{parent}{reply}：{item['text_excerpt']}"
+        return f"- {link}{parent}{reply}：{item.get('text_excerpt') or item.get('comment_text') or ''}"
 
     @classmethod
     def _write_markdown(cls, path: Path, summary: dict[str, Any]) -> None:
@@ -438,12 +521,14 @@ class TopicResearchService:
 
     @staticmethod
     def _html_evidence(item: dict[str, Any]) -> str:
-        label = html.escape(f"[{item['content_type']}] {item['title'] or item['content_id']}")
-        url = _safe_url(item.get("source_url"))
+        identifier = item.get("comment_id") or item.get("content_id") or "evidence"
+        label = html.escape(f"[{item.get('content_type') or 'content'}] {item.get('title') or identifier}")
+        url = _safe_url(item.get("source_url") or item.get("content_url"))
         link = f'<a href="{html.escape(url, quote=True)}" rel="noopener noreferrer">{label}</a>' if url else label
-        parent = f"<span> parent post: {html.escape(str(item['parent_content_id']))}</span>" if item.get("parent_content_id") else ""
+        parent_id = item.get("content_id") if item.get("comment_id") else item.get("parent_content_id")
+        parent = f"<span> parent content: {html.escape(str(parent_id))}</span>" if parent_id else ""
         reply = f"<span> parent comment: {html.escape(str(item['parent_comment_id']))}</span>" if item.get("parent_comment_id") else ""
-        return f"<li>{link}{parent}{reply} — {html.escape(item['text_excerpt'])}</li>"
+        return f"<li>{link}{parent}{reply} — {html.escape(str(item.get('text_excerpt') or item.get('comment_text') or ''))}</li>"
 
     @classmethod
     def _write_html(cls, path: Path, summary: dict[str, Any]) -> None:

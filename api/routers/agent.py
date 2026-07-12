@@ -569,6 +569,7 @@ async def finalize_agent_task(task_id: str, request: AgentTaskFinalizeRequest):
                 collection_started_at=task["started_at"].isoformat(),
                 collection_completed_at=completed_at.isoformat(),
                 dataset_id=request.dataset_id,
+                report_type=request.report_type,
             )
         else:
             result = DatasetBundleExporter().export_xhs_bundle(

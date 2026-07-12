@@ -504,8 +504,8 @@ def _normalize_douyin_content(dataset_id: str, item: dict[str, Any], collection_
     raw_desc = _first_value(item, "desc", "description")
     raw_content = _first_value(item, "content", "content_text", "desc", "description", "title")
     raw_aweme_type = item.get("aweme_type")
-    # Douyin raw rows do not carry hashtags/challenges lists; extract from text.
-    tags = _extract_tags_from_text(raw_title, raw_desc, raw_content)
+    # Keep the normalized text verbatim enough for deterministic report-time
+    # hashtag extraction. Douyin has no independently normalized hashtag schema.
     interaction_status, approximate_fields, parse_error_fields = _douyin_interaction_metadata(item)
     return {
         "dataset_id": dataset_id,
@@ -516,10 +516,10 @@ def _normalize_douyin_content(dataset_id: str, item: dict[str, Any], collection_
         "content_type": _douyin_content_type(raw_aweme_type),
         "author_id": _text(item.get("user_id")),
         "author_name": _text(item.get("nickname") or item.get("user_nickname")),
-        "title": _clean_topic_text(raw_title),
-        "desc": _clean_topic_text(raw_desc),
-        "content_text": _clean_topic_text(raw_content),
-        "tags": json.dumps(tags, ensure_ascii=False),
+        "title": _dedupe_repeated_text(_text(raw_title)),
+        "desc": _dedupe_repeated_text(_text(raw_desc)),
+        "content_text": _dedupe_repeated_text(_text(raw_content)),
+        "tags": "[]",
         "url": _douyin_url(item),
         "publish_time": _text(publish_time),
         "publish_datetime": _datetime(publish_time),

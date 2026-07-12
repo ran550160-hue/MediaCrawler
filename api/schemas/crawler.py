@@ -154,6 +154,7 @@ class AgentTaskFinalizeRequest(BaseModel):
     output_dir: str = "datasets"
     dataset_id: Optional[str] = None
     force: bool = False
+    report_type: str = "none"
 
 
 class CrawlerStatusResponse(BaseModel):

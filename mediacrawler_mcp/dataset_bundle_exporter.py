@@ -186,6 +186,12 @@ class DatasetBundleExporter:
                     f"comments_path={comments_source}",
                 )
 
+        # The local agent may have just stopped a Windows process tree. Refuse a
+        # partial JSONL line instead of silently producing a truncated dataset.
+        self._validate_complete_jsonl(contents_source, "contents")
+        if comments_source is not None:
+            self._validate_complete_jsonl(comments_source, "comments")
+
         output_root = Path(output_dir).expanduser().resolve()
         dataset_id = self._normalize_dataset_id(dataset_id) if dataset_id else make_dataset_id(name, output_root)
         bundle_dir = output_root / dataset_id
@@ -291,6 +297,30 @@ class DatasetBundleExporter:
             for row in rows:
                 f.write(json.dumps(DatasetBundleExporter._clean_record(row), ensure_ascii=False) + "\n")
         return len(rows)
+
+    @staticmethod
+    def _validate_complete_jsonl(path: Path, label: str) -> None:
+        try:
+            with path.open("r", encoding="utf-8") as handle:
+                for line_number, line in enumerate(handle, start=1):
+                    if not line.strip():
+                        continue
+                    try:
+                        value = json.loads(line)
+                    except json.JSONDecodeError as exc:
+                        raise McpAppError(
+                            ErrorCode.INVALID_ARGUMENT,
+                            f"Malformed Douyin {label} JSONL input",
+                            f"path={path}, line={line_number}",
+                        ) from exc
+                    if not isinstance(value, dict):
+                        raise McpAppError(
+                            ErrorCode.INVALID_ARGUMENT,
+                            f"Invalid Douyin {label} JSONL record",
+                            f"path={path}, line={line_number}",
+                        )
+        except OSError as exc:
+            raise McpAppError(ErrorCode.INVALID_ARGUMENT, f"Unable to read Douyin {label} JSONL input", str(path)) from exc
 
     @staticmethod
     def _clean_record(row: dict[str, Any]) -> dict[str, Any]:

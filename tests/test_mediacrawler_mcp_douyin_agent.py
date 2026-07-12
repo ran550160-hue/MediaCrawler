@@ -307,7 +307,7 @@ def _patch_server_client_to_api(monkeypatch, client, output_dir):
         def __init__(self, base_url=None):
             pass
 
-        def finalize_task(self, task_id, dataset_name="", description="", force=False):
+        def finalize_task(self, task_id, dataset_name="", description="", force=False, report_type="none"):
             response = client.post(
                 f"/api/agent/tasks/{task_id}/finalize",
                 json={
@@ -315,6 +315,7 @@ def _patch_server_client_to_api(monkeypatch, client, output_dir):
                     "description": description,
                     "output_dir": str(output_dir),
                     "force": force,
+                    "report_type": report_type,
                 },
             )
             assert response.status_code == 200, response.text
@@ -412,6 +413,23 @@ def test_finalize_returns_counts_and_diagnostics(tmp_path):
     assert "reply_lineage_anomaly_count" in summary
 
 
+def test_finalize_completed_run_uses_complete_jsonl_snapshot_counts(tmp_path):
+    task = _make_task(tmp_path, run_id="run_complete_snapshot_001")
+    run_dir = Path(task["data_root"]) / "douyin" / "run_complete_snapshot_001"
+    metadata = json.loads((run_dir / "run_metadata.json").read_text(encoding="utf-8"))
+    source_counts = {
+        "content_count": sum(1 for line in (run_dir / "jsonl" / "search_contents.jsonl").read_text(encoding="utf-8").splitlines() if json.loads(line)),
+        "comment_count": sum(1 for line in (run_dir / "jsonl" / "search_comments.jsonl").read_text(encoding="utf-8").splitlines() if json.loads(line)),
+    }
+    client = TestClient(app)
+
+    response = client.post(f"/api/agent/tasks/{task['task_id']}/finalize", json={"output_dir": str(tmp_path / "bundle_out")})
+
+    assert metadata["platform"] == "douyin"
+    assert response.status_code == 200
+    assert response.json()["local_finalize"]["metrics"] == source_counts
+
+
 def test_finalize_writes_platform_douyin(tmp_path):
     _make_task(tmp_path)
     client = TestClient(app)
@@ -429,10 +447,11 @@ def test_finalize_default_no_report():
     assert sig.parameters["report_type"].default == "none"
 
 
-def test_finalize_topic_research_unsupported(monkeypatch):
-    """Calling finalize_local_douyin_search with report_type=topic_research returns an error."""
+def test_finalize_topic_research_is_forwarded(monkeypatch):
+    """Calling finalize_local_douyin_search forwards the explicit report request."""
+    calls = []
     monkeypatch.setattr(server, "DesktopAgentClient", lambda **kw: type("Fake", (), {
-        "finalize_task": lambda self, *a, **kw: {"dataset_dir": "/tmp/ds"},
+        "finalize_task": lambda self, *a, **kw: calls.append(kw) or {"dataset_dir": "/tmp/ds", "dataset_id": "ds", "report_type": "topic_research", "report": {"report_id": "report_ds"}},
     })())
     monkeypatch.setattr(server, "_importer", lambda: type("Fake", (), {
         "register_dataset": lambda self, **kw: {"dataset_id": "ds1", "dataset_dir": "/tmp/ds"},
@@ -446,8 +465,9 @@ def test_finalize_topic_research_unsupported(monkeypatch):
     server._FINALIZED_DOUYIN.clear()
 
     result = server.finalize_local_douyin_search("task_test", report_type="topic_research")
-    assert result["status"] == "failed"
-    assert "topic" in result.get("error", {}).get("message", "").lower() or "topic" in result.get("error", {}).get("detail", "").lower()
+    assert result["status"] == "success"
+    assert calls == [{"dataset_name": "", "description": "", "force": False, "report_type": "topic_research"}]
+    assert result["report_type"] == "topic_research"
 
 
 def test_finalize_repeat_is_idempotent(tmp_path):
@@ -628,7 +648,7 @@ def test_finalize_local_douyin_search_registers_and_normalizes(monkeypatch):
         def __init__(self, base_url=None):
             pass
 
-        def finalize_task(self, task_id, dataset_name="", description="", force=False):
+        def finalize_task(self, task_id, dataset_name="", description="", force=False, report_type="none"):
             return {
                 "dataset_dir": "/tmp/ds_dy",
                 "dataset_id": "ds_dy",
@@ -653,7 +673,7 @@ def test_finalize_local_douyin_search_idempotent(monkeypatch):
         def __init__(self, base_url=None):
             pass
 
-        def finalize_task(self, task_id, dataset_name="", description="", force=False):
+        def finalize_task(self, task_id, dataset_name="", description="", force=False, report_type="none"):
             return {"dataset_dir": "/tmp/ds_dy2", "dataset_id": "ds_dy2", "normalized": {"content_count": 1}}
 
     monkeypatch.setattr(server, "DesktopAgentClient", FakeClient)
@@ -665,3 +685,43 @@ def test_finalize_local_douyin_search_idempotent(monkeypatch):
     assert r1["status"] == "success"
     assert r2["status"] == "success"
     assert r2.get("already_finalized") is True
+
+
+def test_api_none_then_mcp_topic_report_reuses_dataset(tmp_path, monkeypatch):
+    task_id = "agent_douyin_none_then_report_001"
+    _make_task(tmp_path, task_id=task_id)
+    client = TestClient(app)
+    bundle_root = tmp_path / "bundle_out"
+
+    first = client.post(f"/api/agent/tasks/{task_id}/finalize", json={"output_dir": str(bundle_root), "report_type": "none"})
+    assert first.status_code == 200
+    _patch_server_client_to_api(monkeypatch, client, bundle_root)
+    server._FINALIZED_DOUYIN.clear()
+    upgraded = server.finalize_local_douyin_search(task_id, report_type="topic_research")
+    repeated = server.finalize_local_douyin_search(task_id, report_type="topic_research")
+
+    assert upgraded["status"] == "success"
+    assert upgraded["dataset_id"] == first.json()["dataset_id"]
+    assert upgraded["report_type"] == "topic_research"
+    assert Path(upgraded["report"]["report_json_path"]).exists()
+    assert repeated["dataset_id"] == upgraded["dataset_id"]
+    assert repeated["report"]["report_id"] == upgraded["report"]["report_id"]
+    assert len(_dataset_bundle_dirs(bundle_root)) == 1
+
+
+def test_mcp_topic_report_then_api_reuses_dataset(tmp_path, monkeypatch):
+    task_id = "agent_douyin_report_then_api_001"
+    _make_task(tmp_path, task_id=task_id)
+    client = TestClient(app)
+    bundle_root = tmp_path / "bundle_out"
+    _patch_server_client_to_api(monkeypatch, client, bundle_root)
+    server._FINALIZED_DOUYIN.clear()
+
+    mcp_first = server.finalize_local_douyin_search(task_id, report_type="topic_research")
+    api_repeat = client.post(f"/api/agent/tasks/{task_id}/finalize", json={"output_dir": str(bundle_root), "report_type": "topic_research"})
+
+    assert mcp_first["status"] == "success"
+    assert api_repeat.status_code == 200
+    assert api_repeat.json()["dataset_id"] == mcp_first["dataset_id"]
+    assert api_repeat.json()["report"]["report_id"] == mcp_first["report"]["report_id"]
+    assert len(_dataset_bundle_dirs(bundle_root)) == 1

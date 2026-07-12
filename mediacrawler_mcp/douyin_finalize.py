@@ -12,6 +12,7 @@ from mediacrawler_mcp.dataset_importer import DatasetImporter
 from mediacrawler_mcp.errors import ErrorCode, McpAppError
 from mediacrawler_mcp.normalizer import DatasetNormalizer
 from mediacrawler_mcp.storage import Storage
+from mediacrawler_mcp.topic_research import TopicResearchService
 
 
 def finalize_douyin_collection_task(
@@ -30,6 +31,7 @@ def finalize_douyin_collection_task(
     collection_completed_at: str | None = None,
     dataset_id: str | None = None,
     normalize: bool = True,
+    report_type: str = "none",
     config: McpConfig | None = None,
     storage: Storage | None = None,
 ) -> dict[str, Any]:
@@ -42,9 +44,16 @@ def finalize_douyin_collection_task(
     storage = storage or Storage(config)
     storage.initialize()
 
+    report_type = (report_type or "none").strip().lower()
+    if report_type not in {"none", "topic_research"}:
+        raise McpAppError(ErrorCode.INVALID_ARGUMENT, "Invalid report type", "report_type must be 'none' or 'topic_research' for Douyin")
+    if report_type == "topic_research" and not normalize:
+        raise McpAppError(ErrorCode.INVALID_ARGUMENT, "Topic research requires normalization")
+
     existing = storage.find_dataset_row_by_collection_task_id(task_id, platform="douyin")
     if existing is not None:
-        return _existing_result(existing, task_id=task_id, normalize=normalize, storage=storage)
+        result = _existing_result(existing, task_id=task_id, normalize=normalize, storage=storage)
+        return _with_report(result, report_type=report_type, storage=storage)
 
     if contents_path is None or not str(contents_path).strip():
         raise McpAppError(ErrorCode.INVALID_ARGUMENT, "No Douyin contents JSONL file found for this task")
@@ -70,7 +79,7 @@ def finalize_douyin_collection_task(
     )
     normalized = DatasetNormalizer(storage).normalize_dataset(registered["dataset_id"], force=True) if normalize else None
 
-    return {
+    result = {
         "task_id": task_id,
         "collection_task_id": task_id,
         "dataset_id": registered["dataset_id"],
@@ -83,6 +92,14 @@ def finalize_douyin_collection_task(
         "report": None,
         "already_finalized": False,
     }
+    return _with_report(result, report_type=report_type, storage=storage)
+
+
+def _with_report(result: dict[str, Any], *, report_type: str, storage: Storage) -> dict[str, Any]:
+    if report_type == "none":
+        return result
+    report = TopicResearchService(storage).generate_topic_research_report(result["dataset_id"])
+    return {**result, "report_type": "topic_research", "report": report}
 
 
 def _existing_result(row: dict[str, Any], *, task_id: str, normalize: bool, storage: Storage) -> dict[str, Any]:
