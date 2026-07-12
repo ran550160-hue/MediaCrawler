@@ -638,6 +638,157 @@ def finalize_local_xhs_search(
         return error_result(ErrorCode.INTERNAL_ERROR, "Failed to finalize local XHS search", str(exc))
 
 
+def start_local_douyin_search(
+    keywords: list[str],
+    max_contents: int = 10,
+    max_comments_per_content: int = 3,
+    include_comments: bool = True,
+    include_sub_comments: bool = False,
+    enable_cdp_mode: bool = False,
+    cdp_connect_existing: bool = False,
+    cdp_debug_port: int = 9222,
+    headless: bool = False,
+    timeout_seconds: int = 1800,
+    base_url: str = "http://127.0.0.1:8080",
+) -> dict[str, Any]:
+    """Start a restricted Windows-local Douyin search task."""
+    try:
+        return DesktopAgentClient(base_url=base_url).start_douyin_search(
+            keywords=keywords,
+            max_contents=max_contents,
+            max_comments_per_content=max_comments_per_content,
+            include_comments=include_comments,
+            include_sub_comments=include_sub_comments,
+            enable_cdp_mode=enable_cdp_mode,
+            cdp_connect_existing=cdp_connect_existing,
+            cdp_debug_port=cdp_debug_port,
+            headless=headless,
+            timeout_seconds=timeout_seconds,
+        )
+    except McpAppError as exc:
+        return exc.to_result()
+    except Exception as exc:  # pragma: no cover - safety boundary for MCP tools
+        logging.exception("Failed to start local Douyin search")
+        return error_result(ErrorCode.INTERNAL_ERROR, "Failed to start local Douyin search", str(exc))
+
+
+def get_local_douyin_search_status(
+    task_id: str,
+    verbose: bool = False,
+    log_limit: int = 10,
+    include_files: bool = True,
+    base_url: str = "http://127.0.0.1:8080",
+) -> dict[str, Any]:
+    """Get status for a Windows-local Douyin search task."""
+    try:
+        return DesktopAgentClient(base_url=base_url).get_task_status(
+            task_id,
+            include_logs=verbose,
+            include_files=include_files,
+            log_limit=log_limit,
+        )
+    except McpAppError as exc:
+        return exc.to_result()
+    except Exception as exc:  # pragma: no cover - safety boundary for MCP tools
+        logging.exception("Failed to get local Douyin search status")
+        return error_result(ErrorCode.INTERNAL_ERROR, "Failed to get local Douyin search status", str(exc))
+
+
+def cancel_local_douyin_search(
+    task_id: str,
+    base_url: str = "http://127.0.0.1:8080",
+) -> dict[str, Any]:
+    """Cancel a Windows-local Douyin search task."""
+    try:
+        return DesktopAgentClient(base_url=base_url).cancel_task(task_id)
+    except McpAppError as exc:
+        return exc.to_result()
+    except Exception as exc:  # pragma: no cover - safety boundary for MCP tools
+        logging.exception("Failed to cancel local Douyin search")
+        return error_result(ErrorCode.INTERNAL_ERROR, "Failed to cancel local Douyin search", str(exc))
+
+
+def retry_local_douyin_search(
+    task_id: str,
+    append: bool = False,
+    base_url: str = "http://127.0.0.1:8080",
+) -> dict[str, Any]:
+    """Retry a Windows-local Douyin search task with a new output directory."""
+    try:
+        return DesktopAgentClient(base_url=base_url).retry_task(task_id, append=append)
+    except McpAppError as exc:
+        return exc.to_result()
+    except Exception as exc:  # pragma: no cover - safety boundary for MCP tools
+        logging.exception("Failed to retry local Douyin search")
+        return error_result(ErrorCode.INTERNAL_ERROR, "Failed to retry local Douyin search", str(exc))
+
+
+_FINALIZED_DOUYIN: dict[str, dict[str, Any]] = {}
+
+
+def finalize_local_douyin_search(
+    task_id: str,
+    normalize: bool = True,
+    report_type: str = "none",
+    dataset_name: str = "",
+    description: str = "",
+    force: bool = False,
+    base_url: str = "http://127.0.0.1:8080",
+) -> dict[str, Any]:
+    """Finalize a local Douyin search; report_type must be none (topic research not yet supported)."""
+    try:
+        report_type = (report_type or "none").strip().lower()
+        if report_type == "topic_research":
+            raise McpAppError(
+                ErrorCode.INVALID_ARGUMENT,
+                "Douyin topic research reports are not yet supported",
+                "Use report_type='none' for Douyin; topic research will be added in a future PR",
+            )
+        if report_type not in {"none"}:
+            raise McpAppError(ErrorCode.INVALID_ARGUMENT, "Invalid report type", "report_type must be 'none' for Douyin")
+
+        # Idempotency: return cached result on repeat finalize
+        if task_id in _FINALIZED_DOUYIN:
+            cached = dict(_FINALIZED_DOUYIN[task_id])
+            cached["already_finalized"] = True
+            return success_result(**cached)
+
+        client = DesktopAgentClient(base_url=base_url)
+        finalized = client.finalize_task(
+            task_id,
+            dataset_name=dataset_name,
+            description=description,
+            force=force,
+        )
+        dataset_dir = finalized.get("dataset_dir")
+        if not dataset_dir:
+            raise McpAppError(ErrorCode.INVALID_ARGUMENT, "Local finalize did not return dataset_dir")
+
+        registered = _importer().register_dataset(dataset_dir=dataset_dir, import_mode="link")
+        dataset_id = registered["dataset_id"]
+        normalized = None
+        if normalize:
+            normalized = DatasetNormalizer(_storage()).normalize_dataset(dataset_id, force=True)
+
+        result = {
+            "task_id": task_id,
+            "dataset_id": dataset_id,
+            "dataset_dir": dataset_dir,
+            "local_finalize": finalized,
+            "registered": registered,
+            "normalized": normalized,
+            "report_type": "none",
+            "report": None,
+        }
+        _FINALIZED_DOUYIN[task_id] = result
+        return success_result(**result)
+    except McpAppError as exc:
+        return exc.to_result()
+    except Exception as exc:  # pragma: no cover - safety boundary for MCP tools
+        logging.exception("Failed to finalize local Douyin search")
+        return error_result(ErrorCode.INTERNAL_ERROR, "Failed to finalize local Douyin search", str(exc))
+
+
 DESKTOP_AGENT_TOOLS = (
     check_local_workbench,
     ensure_cdp_browser,
@@ -646,6 +797,11 @@ DESKTOP_AGENT_TOOLS = (
     cancel_local_xhs_search,
     retry_local_xhs_search,
     finalize_local_xhs_search,
+    start_local_douyin_search,
+    get_local_douyin_search_status,
+    cancel_local_douyin_search,
+    retry_local_douyin_search,
+    finalize_local_douyin_search,
 )
 
 

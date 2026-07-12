@@ -26,6 +26,11 @@ DESKTOP_AGENT_TOOL_NAMES = {
     "cancel_local_xhs_search",
     "retry_local_xhs_search",
     "finalize_local_xhs_search",
+    "start_local_douyin_search",
+    "get_local_douyin_search_status",
+    "cancel_local_douyin_search",
+    "retry_local_douyin_search",
+    "finalize_local_douyin_search",
 }
 
 

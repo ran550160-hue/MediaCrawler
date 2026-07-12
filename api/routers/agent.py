@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import json
 import os
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -12,6 +13,7 @@ from mediacrawler_mcp.dataset_bundle_exporter import DatasetBundleExporter
 from mediacrawler_mcp.errors import McpAppError
 
 from ..schemas import (
+    AgentDouyinSearchRequest,
     AgentTaskFinalizeRequest,
     AgentXHSSearchRequest,
     CrawlerStartRequest,
@@ -48,8 +50,9 @@ def _require_agent_token(
         raise HTTPException(status_code=401, detail="Invalid or missing agent token")
 
 
-def _task_id() -> str:
-    return f"agent_xhs_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
+def _task_id(platform: str = "xhs") -> str:
+    prefix = "agent_douyin" if platform == "douyin" else "agent_xhs"
+    return f"{prefix}_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
 
 
 def _task_data_root(task_id: str) -> Path:
@@ -203,7 +206,57 @@ def _task_status(task: dict[str, Any]) -> str:
     return task["status"]
 
 
+def _douyin_discover_output(task: dict[str, Any]) -> dict[str, Any]:
+    """Discover run-isolated Douyin output containing search contents/comments.
+
+    Returns a dict with contents, comments (Path or None), and run_id.
+    Raises HTTPException on multi-run ambiguity.
+    """
+    data_root = Path(task.get("data_root") or DATA_DIR)
+    dy_dir = data_root / "douyin"
+    empty = {"contents": None, "comments": None, "run_id": None}
+    if not dy_dir.exists():
+        return empty
+    run_dirs = [
+        child for child in dy_dir.iterdir()
+        if child.is_dir() and (child / "run_metadata.json").exists()
+    ]
+    usable: list[Path] = []
+    for run in run_dirs:
+        try:
+            meta = json.loads((run / "run_metadata.json").read_text(encoding="utf-8"))
+            if meta.get("platform") != "douyin":
+                continue
+        except Exception:
+            continue
+        if (run / "jsonl" / "search_contents.jsonl").exists() or (run / "jsonl" / "search_comments.jsonl").exists():
+            usable.append(run)
+    if not usable:
+        return empty
+    if len(usable) > 1:
+        raise HTTPException(
+            status_code=409,
+            detail="Multiple Douyin runs found in output directory; cannot uniquely determine which run to finalize",
+        )
+    chosen = usable[0]
+    contents = chosen / "jsonl" / "search_contents.jsonl"
+    comments = chosen / "jsonl" / "search_comments.jsonl"
+    return {
+        "contents": contents if contents.exists() else None,
+        "comments": comments if comments.exists() else None,
+        "run_id": chosen.name,
+    }
+
+
+def _douyin_candidate_jsonl_files(task: dict[str, Any]) -> dict[str, Path | None]:
+    discovery = _douyin_discover_output(task)
+    return {"contents": discovery["contents"], "comments": discovery["comments"]}
+
+
 def _candidate_jsonl_files(task: dict[str, Any]) -> dict[str, Path | None]:
+    platform = task.get("platform", "xhs")
+    if platform == "douyin":
+        return _douyin_candidate_jsonl_files(task)
     result: dict[str, Path | None] = {"contents": None, "comments": None}
     data_root = Path(task.get("data_root") or DATA_DIR)
     jsonl_dir = data_root / "xhs" / "jsonl"
@@ -249,6 +302,7 @@ def _task_payload(
     can_finalize = progress["has_output"]
     payload = {
         "task_id": task["task_id"],
+        "platform": task.get("platform", "xhs"),
         "status": status,
         "message": task.get("message", ""),
         "keywords": task["keywords"],
@@ -291,7 +345,7 @@ async def _start_agent_task(
             detail=f"max_comments_per_content must be <= {MAX_AGENT_COMMENTS_PER_CONTENT}",
         )
 
-    task_id = _task_id()
+    task_id = _task_id("xhs")
     data_root = data_root_override.resolve() if data_root_override else _task_data_root(task_id)
     data_root.mkdir(parents=True, exist_ok=True)
     crawler_request = CrawlerStartRequest(
@@ -314,6 +368,7 @@ async def _start_agent_task(
 
     task = {
         "task_id": task_id,
+        "platform": "xhs",
         "status": "accepted",
         "keywords": keywords,
         "request": request.model_dump(),
@@ -352,6 +407,91 @@ async def start_xhs_search(request: AgentXHSSearchRequest):
     return await _start_agent_task(request)
 
 
+async def _start_douyin_agent_task(
+    request: AgentDouyinSearchRequest,
+    *,
+    data_root_override: Path | None = None,
+    retried_from: str | None = None,
+):
+    """Create and start a task-scoped local Douyin search."""
+    global _current_task_id
+
+    if crawler_manager.process and crawler_manager.process.poll() is None:
+        raise HTTPException(status_code=409, detail="Crawler is already running")
+
+    keywords = _split_keywords(request.keywords)
+    if not keywords:
+        raise HTTPException(status_code=422, detail="At least one keyword is required")
+    if request.max_contents > MAX_AGENT_CONTENTS:
+        raise HTTPException(status_code=422, detail=f"max_contents must be <= {MAX_AGENT_CONTENTS}")
+    if request.max_comments_per_content > MAX_AGENT_COMMENTS_PER_CONTENT:
+        raise HTTPException(
+            status_code=422,
+            detail=f"max_comments_per_content must be <= {MAX_AGENT_COMMENTS_PER_CONTENT}",
+        )
+
+    task_id = _task_id("douyin")
+    data_root = data_root_override.resolve() if data_root_override else _task_data_root(task_id)
+    data_root.mkdir(parents=True, exist_ok=True)
+    crawler_request = CrawlerStartRequest(
+        platform=PlatformEnum.DOUYIN,
+        login_type=LoginTypeEnum.QRCODE,
+        crawler_type=CrawlerTypeEnum.SEARCH,
+        keywords=",".join(keywords),
+        start_page=1,
+        enable_comments=request.include_comments,
+        enable_sub_comments=request.include_sub_comments,
+        save_option=SaveDataOptionEnum.JSONL,
+        headless=request.headless,
+        max_notes_count=request.max_contents,
+        max_comments_count=request.max_comments_per_content if request.include_comments else None,
+        enable_cdp_mode=request.enable_cdp_mode,
+        cdp_connect_existing=request.cdp_connect_existing,
+        cdp_debug_port=request.cdp_debug_port,
+        save_data_path=str(data_root),
+    )
+
+    task = {
+        "task_id": task_id,
+        "platform": "douyin",
+        "status": "accepted",
+        "keywords": keywords,
+        "request": request.model_dump(),
+        "dataset_name": request.dataset_name,
+        "description": request.description,
+        "data_root": str(data_root),
+        "retried_from": retried_from,
+        "started_at": datetime.now(),
+        "completed_at": None,
+        "exit_code": None,
+        "message": "Local Douyin search accepted",
+    }
+    _tasks[task_id] = task
+    _current_task_id = task_id
+
+    success = await crawler_manager.start(crawler_request)
+    if not success:
+        task["status"] = "failed"
+        task["message"] = "Failed to start local Douyin search"
+        raise HTTPException(status_code=500, detail=task["message"])
+
+    task["status"] = "running"
+    task["message"] = "Local Douyin search started"
+    return {
+        "task_id": task_id,
+        "status": "running",
+        "message": task["message"],
+        "data_root": str(data_root),
+        "retried_from": retried_from,
+    }
+
+
+@router.post("/douyin/search", dependencies=[Depends(_require_agent_token)])
+async def start_douyin_search(request: AgentDouyinSearchRequest):
+    """Start a restricted local Douyin search for Hermes/local agents."""
+    return await _start_douyin_agent_task(request)
+
+
 @router.get("/tasks/{task_id}", dependencies=[Depends(_require_agent_token)])
 async def get_agent_task(
     task_id: str,
@@ -377,6 +517,10 @@ async def finalize_agent_task(task_id: str, request: AgentTaskFinalizeRequest):
     if not task:
         raise HTTPException(status_code=404, detail="Agent task not found")
 
+    # Idempotency: return existing finalized result without re-exporting
+    if task.get("finalized"):
+        return {"status": "success", "already_finalized": True, **task["finalized"]}
+
     await _apply_runtime_guards(task)
     status = _task_status(task)
     progress = _task_progress(task)
@@ -394,30 +538,48 @@ async def finalize_agent_task(task_id: str, request: AgentTaskFinalizeRequest):
     if status not in FINALIZABLE_STATUSES and not (request.force and progress["has_output"]):
         raise HTTPException(status_code=409, detail=f"Task is not ready to finalize: {status}")
 
+    platform = task.get("platform", "xhs")
     candidates = _candidate_jsonl_files(task)
     contents_path = candidates["contents"]
     comments_path = candidates["comments"]
     if not contents_path and not comments_path:
         raise HTTPException(status_code=404, detail="No JSONL output files found for this task")
 
-    dataset_name = request.dataset_name or task.get("dataset_name") or f"XHS 搜索 {' '.join(task['keywords'])}"
+    dataset_name = request.dataset_name or task.get("dataset_name") or f"{'Douyin' if platform == 'douyin' else 'XHS'} search {' '.join(task['keywords'])}"
     description = request.description or task.get("description") or "Exported from local Hermes agent search"
 
     try:
-        result = DatasetBundleExporter().export_xhs_bundle(
-            name=dataset_name,
-            output_dir=Path(request.output_dir),
-            keywords=task["keywords"],
-            description=description,
-            data_root=Path(task.get("data_root") or DATA_DIR),
-            crawler_type="search",
-            contents_path=contents_path,
-            comments_path=comments_path,
-            dataset_id=request.dataset_id,
-            collection_task_id=task_id,
-            collection_started_at=task["started_at"].isoformat(),
-            collection_completed_at=(task.get("completed_at") or datetime.now()).isoformat(),
-        )
+        if platform == "douyin":
+            if not contents_path:
+                raise HTTPException(status_code=404, detail="No Douyin contents JSONL file found for this task")
+            discovery = _douyin_discover_output(task)
+            result = DatasetBundleExporter().export_douyin_bundle(
+                name=dataset_name,
+                output_dir=Path(request.output_dir),
+                keywords=task["keywords"],
+                contents_path=contents_path,
+                comments_path=comments_path,
+                run_id=discovery.get("run_id"),
+                crawler_type="search",
+                description=description,
+                collection_started_at=task["started_at"].isoformat(),
+                dataset_id=request.dataset_id,
+            )
+        else:
+            result = DatasetBundleExporter().export_xhs_bundle(
+                name=dataset_name,
+                output_dir=Path(request.output_dir),
+                keywords=task["keywords"],
+                description=description,
+                data_root=Path(task.get("data_root") or DATA_DIR),
+                crawler_type="search",
+                contents_path=contents_path,
+                comments_path=comments_path,
+                dataset_id=request.dataset_id,
+                collection_task_id=task_id,
+                collection_started_at=task["started_at"].isoformat(),
+                collection_completed_at=(task.get("completed_at") or datetime.now()).isoformat(),
+            )
     except McpAppError as exc:
         raise HTTPException(status_code=400, detail=exc.to_result()) from exc
 
@@ -431,6 +593,7 @@ async def finalize_agent_task(task_id: str, request: AgentTaskFinalizeRequest):
         "progress": progress,
         "files": _task_files(task),
     }
+
 
 
 @router.post("/tasks/{task_id}/cancel", dependencies=[Depends(_require_agent_token)])
@@ -467,7 +630,12 @@ async def retry_agent_task(task_id: str, append: bool = True):
     task = _tasks.get(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Agent task not found")
-    request = AgentXHSSearchRequest(**task["request"])
+    platform = task.get("platform", "xhs")
     data_root = Path(task["data_root"]) if append and task.get("data_root") else None
-    result = await _start_agent_task(request, data_root_override=data_root, retried_from=task_id)
+    if platform == "douyin":
+        request = AgentDouyinSearchRequest(**task["request"])
+        result = await _start_douyin_agent_task(request, data_root_override=data_root, retried_from=task_id)
+    else:
+        request = AgentXHSSearchRequest(**task["request"])
+        result = await _start_agent_task(request, data_root_override=data_root, retried_from=task_id)
     return {"retried_from": task_id, "append": append, **result}

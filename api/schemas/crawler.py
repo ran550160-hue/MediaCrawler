@@ -130,6 +130,23 @@ class AgentXHSSearchRequest(BaseModel):
     description: str = ""
 
 
+class AgentDouyinSearchRequest(BaseModel):
+    """Restricted local-agent Douyin search request"""
+    keywords: list[str]
+    max_contents: int = Field(default=10, ge=1, le=200)
+    max_comments_per_content: int = Field(default=3, ge=0, le=200)
+    include_comments: bool = True
+    include_sub_comments: bool = False
+    cdp_debug_port: int = Field(default=9222, ge=1, le=65535)
+    headless: bool = False
+    enable_cdp_mode: bool = False
+    cdp_connect_existing: bool = False
+    login_type: str = "qrcode"
+    timeout_seconds: int = Field(default=1800, ge=30, le=21600)
+    dataset_name: str = ""
+    description: str = ""
+
+
 class AgentTaskFinalizeRequest(BaseModel):
     """Finalize a local-agent task into a dataset bundle"""
     dataset_name: str = ""

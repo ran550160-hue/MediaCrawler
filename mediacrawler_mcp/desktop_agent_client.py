@@ -132,6 +132,38 @@ class DesktopAgentClient:
             )
         )
 
+    def start_douyin_search(
+        self,
+        keywords: list[str],
+        max_contents: int = 10,
+        max_comments_per_content: int = 3,
+        include_comments: bool = True,
+        include_sub_comments: bool = False,
+        enable_cdp_mode: bool = False,
+        cdp_connect_existing: bool = False,
+        cdp_debug_port: int = 9222,
+        headless: bool = False,
+        timeout_seconds: int = 1800,
+    ) -> dict[str, Any]:
+        return convert_windows_paths(
+            self._request(
+                "POST",
+                "/api/agent/douyin/search",
+                json={
+                    "keywords": keywords,
+                    "max_contents": max_contents,
+                    "max_comments_per_content": max_comments_per_content,
+                    "include_comments": include_comments,
+                    "include_sub_comments": include_sub_comments,
+                    "enable_cdp_mode": enable_cdp_mode,
+                    "cdp_connect_existing": cdp_connect_existing,
+                    "cdp_debug_port": cdp_debug_port,
+                    "headless": headless,
+                    "timeout_seconds": timeout_seconds,
+                },
+            )
+        )
+
     def get_task_status(
         self,
         task_id: str,
