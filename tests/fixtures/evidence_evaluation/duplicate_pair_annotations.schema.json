@@ -1,0 +1,12 @@
+{
+  "type": "object",
+  "required": ["research_run_id", "evidence_set_fingerprint", "left_evidence_id", "right_evidence_id", "expected_relation", "annotation_reason"],
+  "properties": {
+    "research_run_id": {"type": "string"},
+    "evidence_set_fingerprint": {"type": "string"},
+    "left_evidence_id": {"type": "string"},
+    "right_evidence_id": {"type": "string"},
+    "expected_relation": {"enum": ["duplicate", "not_duplicate", "uncertain"]},
+    "annotation_reason": {"type": "string"}
+  }
+}

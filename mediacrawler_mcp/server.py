@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import sys
@@ -17,6 +18,9 @@ from mediacrawler_mcp.config import load_config
 from mediacrawler_mcp.dataset_importer import DatasetImporter
 from mediacrawler_mcp.dataset_service import DatasetService
 from mediacrawler_mcp.desktop_agent_client import DesktopAgentClient
+from mediacrawler_mcp.evidence_analysis import EvidenceAnalysis
+from mediacrawler_mcp.evidence_ledger import EvidenceLedger
+from mediacrawler_mcp.evaluation_orchestrator import EvaluationOrchestrator
 from mediacrawler_mcp.errors import ErrorCode, McpAppError, error_result, success_result
 from mediacrawler_mcp.normalizer import DatasetNormalizer
 from mediacrawler_mcp.query_engine import QueryEngine
@@ -66,6 +70,19 @@ def _importer() -> DatasetImporter:
     setup_file_logging(config.server_log_path)
     storage = Storage(config)
     return DatasetImporter(config, storage)
+
+
+def _evidence_ledger() -> EvidenceLedger:
+    return EvidenceLedger(_storage())
+
+
+def _evidence_analysis() -> EvidenceAnalysis:
+    return EvidenceAnalysis(_storage())
+
+
+def _evaluation_orchestrator() -> EvaluationOrchestrator:
+    config = load_config()
+    return EvaluationOrchestrator(Storage(config), config.home / "evaluation" / "runs")
 
 
 def _login_manager_class() -> Any:
@@ -223,6 +240,203 @@ def get_dataset(dataset_id: str) -> dict[str, Any]:
     except Exception as exc:  # pragma: no cover - safety boundary for MCP tools
         logging.exception("Failed to get dataset")
         return error_result(ErrorCode.INTERNAL_ERROR, "Failed to get dataset", str(exc))
+
+
+@mcp.tool()
+def create_research_run(
+    question: str,
+    platforms: list[str],
+    keywords: list[str],
+    time_range: dict[str, Any] | None = None,
+    sample_limits: dict[str, Any] | None = None,
+    collection_task_ids: list[str] | None = None,
+    dataset_version: str | None = None,
+) -> dict[str, Any]:
+    """Create a research scope before collecting or ledgering evidence."""
+    try:
+        run = _evidence_ledger().create_research_run(
+            question=question,
+            platforms=platforms,
+            keywords=keywords,
+            time_range=time_range,
+            sample_limits=sample_limits,
+            collection_task_ids=collection_task_ids,
+            dataset_version=dataset_version,
+        )
+        return success_result(research_run=run.to_dict())
+    except McpAppError as exc:
+        return exc.to_result()
+    except Exception as exc:  # pragma: no cover - safety boundary for MCP tools
+        logging.exception("Failed to create research run")
+        return error_result(ErrorCode.INTERNAL_ERROR, "Failed to create research run", str(exc))
+
+
+@mcp.tool()
+def get_research_run(research_run_id: str) -> dict[str, Any]:
+    """Get a research scope and its current evidence-ledger status."""
+    try:
+        return success_result(research_run=_evidence_ledger().get_research_run(research_run_id).to_dict())
+    except McpAppError as exc:
+        return exc.to_result()
+    except Exception as exc:  # pragma: no cover - safety boundary for MCP tools
+        logging.exception("Failed to get research run")
+        return error_result(ErrorCode.INTERNAL_ERROR, "Failed to get research run", str(exc))
+
+
+@mcp.tool()
+def build_evidence_ledger(research_run_id: str, dataset_id: str) -> dict[str, Any]:
+    """Upsert citation-ready evidence from a normalized dataset's content rows."""
+    try:
+        return success_result(**_evidence_ledger().build_evidence_items(research_run_id, dataset_id))
+    except McpAppError as exc:
+        return exc.to_result()
+    except Exception as exc:  # pragma: no cover - safety boundary for MCP tools
+        logging.exception("Failed to build evidence ledger")
+        return error_result(ErrorCode.INTERNAL_ERROR, "Failed to build evidence ledger", str(exc))
+
+
+@mcp.tool()
+def recover_evidence_ledger_build(research_run_id: str, expected_build_started_at: str, min_age_seconds: int = 300) -> dict[str, Any]:
+    """Release a stale building state only after its owning process has exited."""
+    try:
+        return success_result(**_evidence_ledger().recover_stale_build(research_run_id, expected_build_started_at, min_age_seconds))
+    except McpAppError as exc:
+        return exc.to_result()
+    except Exception as exc:  # pragma: no cover - safety boundary for MCP tools
+        logging.exception("Failed to recover evidence ledger build")
+        return error_result(ErrorCode.INTERNAL_ERROR, "Failed to recover evidence ledger build", str(exc))
+
+
+@mcp.tool()
+def list_evidence_items(
+    research_run_id: str,
+    platform: str | None = None,
+    content_type: str | None = None,
+    limit: int = 20,
+    offset: int = 0,
+) -> dict[str, Any]:
+    """Page compact evidence summaries; raw metadata and unbounded text require get_evidence_item."""
+    try:
+        return success_result(
+            **_evidence_ledger().list_evidence_items(
+                research_run_id,
+                platform=platform,
+                content_type=content_type,
+                limit=limit,
+                offset=offset,
+            )
+        )
+    except McpAppError as exc:
+        return exc.to_result()
+    except Exception as exc:  # pragma: no cover - safety boundary for MCP tools
+        logging.exception("Failed to list evidence items")
+        return error_result(ErrorCode.INTERNAL_ERROR, "Failed to list evidence items", str(exc))
+
+
+@mcp.tool()
+def get_evidence_item(research_run_id: str, evidence_id: str) -> dict[str, Any]:
+    """Get one complete immutable evidence version, including discovery and observation records."""
+    try:
+        return success_result(evidence_item=_evidence_ledger().get_evidence_item(research_run_id, evidence_id).to_dict())
+    except McpAppError as exc:
+        return exc.to_result()
+    except Exception as exc:  # pragma: no cover - safety boundary for MCP tools
+        logging.exception("Failed to get evidence item")
+        return error_result(ErrorCode.INTERNAL_ERROR, "Failed to get evidence item", str(exc))
+
+
+@mcp.tool()
+def list_evidence_versions(
+    platform: str,
+    content_type: str,
+    content_id: str,
+    limit: int = 20,
+) -> dict[str, Any]:
+    """List immutable evidence versions for one platform content entity across research runs."""
+    try:
+        return success_result(**_evidence_ledger().list_evidence_versions(platform, content_type, content_id, limit))
+    except McpAppError as exc:
+        return exc.to_result()
+    except Exception as exc:  # pragma: no cover - safety boundary for MCP tools
+        logging.exception("Failed to list evidence versions")
+        return error_result(ErrorCode.INTERNAL_ERROR, "Failed to list evidence versions", str(exc))
+
+
+@mcp.tool()
+def analyze_evidence_candidates(research_run_id: str, near_duplicate_threshold: float = 0.85) -> dict[str, Any]:
+    """Create rule-based relevance decisions and exact/near duplicate candidates; no LLM or Claim generation."""
+    try:
+        return success_result(**_evidence_analysis().analyze(research_run_id, near_duplicate_threshold))
+    except McpAppError as exc:
+        return exc.to_result()
+    except Exception as exc:  # pragma: no cover - safety boundary for MCP tools
+        logging.exception("Failed to analyze evidence candidates")
+        return error_result(ErrorCode.INTERNAL_ERROR, "Failed to analyze evidence candidates", str(exc))
+
+
+@mcp.tool()
+def list_relevance_decisions(analysis_run_id: str) -> dict[str, Any]:
+    """List explainable relevance decisions, each bound to one evidence_id."""
+    try:
+        return success_result(relevance_decisions=_evidence_analysis().list_relevance_decisions(analysis_run_id))
+    except Exception as exc:  # pragma: no cover - safety boundary for MCP tools
+        logging.exception("Failed to list relevance decisions")
+        return error_result(ErrorCode.INTERNAL_ERROR, "Failed to list relevance decisions", str(exc))
+
+
+@mcp.tool()
+def list_duplicate_candidate_groups(analysis_run_id: str) -> dict[str, Any]:
+    """List exact and near-duplicate candidate groups without modifying EvidenceItem."""
+    try:
+        return success_result(duplicate_candidate_groups=_evidence_analysis().list_duplicate_candidate_groups(analysis_run_id))
+    except Exception as exc:  # pragma: no cover - safety boundary for MCP tools
+        logging.exception("Failed to list duplicate candidate groups")
+        return error_result(ErrorCode.INTERNAL_ERROR, "Failed to list duplicate candidate groups", str(exc))
+
+
+@mcp.tool()
+def list_duplicate_candidate_edges(analysis_run_id: str) -> dict[str, Any]:
+    """List every exact/near duplicate candidate edge and its score."""
+    try:
+        return success_result(duplicate_candidate_edges=_evidence_analysis().list_duplicate_candidate_edges(analysis_run_id))
+    except Exception as exc:  # pragma: no cover - safety boundary for MCP tools
+        logging.exception("Failed to list duplicate candidate edges")
+        return error_result(ErrorCode.INTERNAL_ERROR, "Failed to list duplicate candidate edges", str(exc))
+
+
+@mcp.tool()
+def prepare_evaluation(card: dict[str, Any], dataset_id: str | None = None, research_run_id: str | None = None) -> dict[str, Any]:
+    """Prepare a frozen evaluation and blind annotation templates; never writes annotations."""
+    try:
+        result = _evaluation_orchestrator().prepare(card, dataset_id=dataset_id, research_run_id=research_run_id)
+        return success_result(evaluation_id=result["evaluation_id"], research_run_id=result["research_run_id"], analysis_run_id=result["analysis_run_id"], evidence_set_fingerprint=result["evidence_set_fingerprint"], sampling=result["sampling"], status=result["evaluation_status"])
+    except McpAppError as exc:
+        return exc.to_result()
+    except Exception as exc:
+        return error_result(ErrorCode.INTERNAL_ERROR, "Failed to prepare evaluation", str(exc))
+
+
+@mcp.tool()
+def get_evaluation_status(evaluation_id: str) -> dict[str, Any]:
+    """Return only evaluation progress and IDs, never annotation bodies."""
+    try:
+        return success_result(**_evaluation_orchestrator().status(load_config().home / "evaluation" / "runs" / evaluation_id))
+    except McpAppError as exc:
+        return exc.to_result()
+
+
+@mcp.tool()
+def get_evaluation_report(evaluation_id: str) -> dict[str, Any]:
+    """Return a controlled report summary, never full annotation JSONL."""
+    try:
+        directory = load_config().home / "evaluation" / "runs" / evaluation_id
+        status = _evaluation_orchestrator().status(directory)
+        report = json.loads((directory / "evaluation_report.json").read_text(encoding="utf-8"))
+        return success_result(evaluation_id=evaluation_id, status=status["evaluation_status"], report_status=status["report_status"], relevance=report.get("relevance"), duplicates=report.get("duplicates"), annotation_completeness=report.get("annotation_completeness"))
+    except FileNotFoundError:
+        return error_result(ErrorCode.NOT_FOUND, "Evaluation report not found")
+    except McpAppError as exc:
+        return exc.to_result()
 
 
 @mcp.tool()

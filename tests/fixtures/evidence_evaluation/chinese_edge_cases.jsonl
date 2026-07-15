@@ -1,0 +1,8 @@
+{"case":"synonym_no_substring","text":"用智能代码助手接私活前先写清验收条款","expected_relevance":"uncertain"}
+{"case":"same_product_irrelevant","text":"AI编程这个产品名印在咖啡杯上很好看","expected_relevance":"excluded"}
+{"case":"negation","text":"不建议没有合同就接单","expected_relevance":"included"}
+{"case":"short_comment","text":"别接","expected_near_candidate":false}
+{"case":"template_copy","text":"私信领取资料，点击主页查看更多","expected_duplicate_group":"template"}
+{"case":"cross_account_copy","text":"AI编程接单要先确认交付边界并书面记录验收标准","expected_duplicate_group":"copied"}
+{"case":"same_text_new_engagement","text":"AI编程接单要先确认交付边界并书面记录验收标准","expected_duplicate_group":"copied"}
+{"case":"chain_a_b_c","text":"A≈B、B≈C、A不≈C；候选组必须保存两条边","expected_chain_expansion":true}

@@ -1,0 +1,16 @@
+{
+  "type": "object",
+  "required": ["research_question", "research_run_id", "evidence_set_fingerprint", "evidence_id", "expected_relevance", "expected_duplicate_group", "annotation_reason", "annotator", "annotated_at", "annotation_schema_version"],
+  "properties": {
+    "research_question": {"type": "string"},
+    "research_run_id": {"type": "string"},
+    "evidence_set_fingerprint": {"type": "string"},
+    "evidence_id": {"type": "string"},
+    "expected_relevance": {"enum": ["included", "excluded", "uncertain"]},
+    "expected_duplicate_group": {"type": ["string", "null"]},
+    "annotation_reason": {"type": "string"},
+    "annotator": {"type": "string"},
+    "annotated_at": {"type": "string"},
+    "annotation_schema_version": {"const": "evaluation-annotation-v2"}
+  }
+}
